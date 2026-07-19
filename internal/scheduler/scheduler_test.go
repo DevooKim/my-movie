@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func TestRunOnceFetchesCGVBranchOnceAndSplitsEnabledTargets(t *testing.T) {
 		{TargetID: "cgv-yongsan-4dx", ExternalID: "4dx"},
 	}}
 	delivery := &fakeDelivery{}
-	scheduler := New(store, delivery, map[domain.ProviderID]BranchProvider{domain.ProviderCGV: provider}, Options{Jitter: func() time.Duration { return 0 }, Sleep: noSleep, Now: time.Now})
+	scheduler := New(store, delivery, map[domain.ProviderID]BranchProvider{domain.ProviderCGV: provider}, Options{Sleep: noSleep, Now: time.Now})
 
 	if err := scheduler.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -44,7 +45,7 @@ func TestRunOnceFetchesEachEnabledMegaboxBranch(t *testing.T) {
 		{TargetID: "megabox-namhyeona-dolby", Enabled: true},
 	}}
 	provider := &fakeProvider{id: domain.ProviderMegabox}
-	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]BranchProvider{domain.ProviderMegabox: provider}, Options{Jitter: func() time.Duration { return 0 }, Sleep: noSleep, Now: time.Now})
+	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]BranchProvider{domain.ProviderMegabox: provider}, Options{Sleep: noSleep, Now: time.Now})
 
 	if err := scheduler.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -57,7 +58,7 @@ func TestRunOnceFetchesEachEnabledMegaboxBranch(t *testing.T) {
 func TestFailedBranchDoesNotRecordTargetSnapshots(t *testing.T) {
 	store := &fakeStore{states: []database.TargetState{{TargetID: "cgv-yongsan-imax", Enabled: true}}}
 	provider := &fakeProvider{id: domain.ProviderCGV, err: errors.New("upstream failed")}
-	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]BranchProvider{domain.ProviderCGV: provider}, Options{Jitter: func() time.Duration { return 0 }, Sleep: noSleep, Now: time.Now})
+	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]BranchProvider{domain.ProviderCGV: provider}, Options{Sleep: noSleep, Now: time.Now})
 
 	if err := scheduler.RunOnce(context.Background()); err == nil {
 		t.Fatal("expected provider error")
@@ -72,7 +73,7 @@ func TestRunOnceRejectsOverlappingCycle(t *testing.T) {
 	release := make(chan struct{})
 	provider := &fakeProvider{id: domain.ProviderMegabox, started: started, release: release}
 	store := &fakeStore{states: []database.TargetState{{TargetID: "megabox-coex-dolby", Enabled: true}}}
-	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]BranchProvider{domain.ProviderMegabox: provider}, Options{Jitter: func() time.Duration { return 0 }, Sleep: noSleep, Now: time.Now})
+	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]BranchProvider{domain.ProviderMegabox: provider}, Options{Sleep: noSleep, Now: time.Now})
 	done := make(chan error, 1)
 	go func() { done <- scheduler.RunOnce(context.Background()) }()
 	<-started
@@ -85,13 +86,138 @@ func TestRunOnceRejectsOverlappingCycle(t *testing.T) {
 	}
 }
 
-func TestJitterStaysWithinTenSeconds(t *testing.T) {
-	if got := JitterFrom(func() float64 { return 0 }); got != 0 {
-		t.Fatalf("minimum jitter=%s", got)
+func TestBurstOffsetsCoverBoundaryThroughThirtySeconds(t *testing.T) {
+	want := []time.Duration{0, 5 * time.Second, 10 * time.Second, 15 * time.Second, 20 * time.Second, 25 * time.Second, 30 * time.Second}
+	got := burstOffsets()
+	if len(got) != len(want) {
+		t.Fatalf("offsets=%v", got)
 	}
-	if got := JitterFrom(func() float64 { return 1 }); got != 10*time.Second {
-		t.Fatalf("maximum jitter=%s", got)
+	for index, offset := range want {
+		if got[index] != offset {
+			t.Fatalf("offset[%d]=%s want=%s", index, got[index], offset)
+		}
 	}
+}
+
+func TestBurstBoundaryUsesCurrentWindowThroughThirtySeconds(t *testing.T) {
+	boundary := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	if got := burstBoundary(boundary.Add(10*time.Second), 5*time.Minute); !got.Equal(boundary) {
+		t.Fatalf("boundary=%s", got)
+	}
+	if got := burstBoundary(boundary.Add(31*time.Second), 5*time.Minute); !got.Equal(boundary.Add(5 * time.Minute)) {
+		t.Fatalf("boundary=%s", got)
+	}
+}
+
+func TestRunBurstPreparesCGVAndPollsEveryFiveSecondsThroughThirtySeconds(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 7, 19, 11, 59, 50, 0, time.UTC)}
+	cgv := &fakePreparingProvider{id: domain.ProviderCGV}
+	megabox := &fakeProvider{id: domain.ProviderMegabox}
+	store := &fakeStore{states: []database.TargetState{
+		{TargetID: "cgv-yongsan-imax", Enabled: true},
+		{TargetID: "megabox-coex-dolby", Enabled: true},
+	}}
+	delivery := &fakeDelivery{}
+	scheduler := New(store, delivery, map[domain.ProviderID]BranchProvider{
+		domain.ProviderCGV:     cgv,
+		domain.ProviderMegabox: megabox,
+	}, Options{Sleep: clock.Sleep, Now: clock.Now})
+
+	boundary := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	if err := scheduler.runBurst(context.Background(), boundary); err != nil {
+		t.Fatal(err)
+	}
+	if cgv.prepareCalls != 1 || cgv.poll.fetchCalls != 7 || cgv.poll.closeCalls != 1 {
+		t.Fatalf("cgv prepare=%d fetch=%d close=%d", cgv.prepareCalls, cgv.poll.fetchCalls, cgv.poll.closeCalls)
+	}
+	if megabox.calls != 7 {
+		t.Fatalf("megabox calls=%d", megabox.calls)
+	}
+	if delivery.calls != 14 {
+		t.Fatalf("delivery calls=%d", delivery.calls)
+	}
+	wantSleeps := []time.Duration{10 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second}
+	if len(clock.sleeps) != len(wantSleeps) {
+		t.Fatalf("sleeps=%v", clock.sleeps)
+	}
+	for index, want := range wantSleeps {
+		if clock.sleeps[index] != want {
+			t.Fatalf("sleep[%d]=%s want=%s", index, clock.sleeps[index], want)
+		}
+	}
+}
+
+func TestRunBurstDoesNotBlockMegaboxWhileCGVPrepares(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 7, 19, 11, 59, 50, 0, time.UTC)}
+	cgv := &blockingPreparingProvider{id: domain.ProviderCGV, started: make(chan struct{})}
+	megabox := &fakeProvider{id: domain.ProviderMegabox}
+	store := &fakeStore{states: []database.TargetState{
+		{TargetID: "cgv-yongsan-imax", Enabled: true},
+		{TargetID: "megabox-coex-dolby", Enabled: true},
+	}}
+	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]BranchProvider{
+		domain.ProviderCGV:     cgv,
+		domain.ProviderMegabox: megabox,
+	}, Options{Sleep: clock.Sleep, Now: clock.Now})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- scheduler.runBurst(ctx, time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC))
+	}()
+	<-cgv.started
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("Megabox polling waited for CGV preparation")
+	}
+	if megabox.calls != 7 {
+		t.Fatalf("megabox calls=%d", megabox.calls)
+	}
+	if cgv.normalFetchCalls != 0 {
+		t.Fatalf("CGV fallback calls=%d", cgv.normalFetchCalls)
+	}
+}
+
+func TestRunBurstDoesNotWaitForUnresponsivePreparationDuringCleanup(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 7, 19, 11, 59, 50, 0, time.UTC)}
+	cgv := &unresponsivePreparingProvider{id: domain.ProviderCGV, started: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
+	megabox := &fakeProvider{id: domain.ProviderMegabox}
+	store := &fakeStore{states: []database.TargetState{
+		{TargetID: "cgv-yongsan-imax", Enabled: true},
+		{TargetID: "megabox-coex-dolby", Enabled: true},
+	}}
+	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]BranchProvider{
+		domain.ProviderCGV:     cgv,
+		domain.ProviderMegabox: megabox,
+	}, Options{Sleep: clock.Sleep, Now: clock.Now})
+	done := make(chan error, 1)
+	go func() {
+		done <- scheduler.runBurst(context.Background(), time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC))
+	}()
+	<-cgv.started
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(cgv.release)
+		<-done
+		t.Fatal("burst cleanup waited for unresponsive preparation")
+	}
+	if err := scheduler.RunOnce(context.Background()); !errors.Is(err, ErrCycleRunning) {
+		t.Fatalf("overlapping run error=%v", err)
+	}
+	close(cgv.release)
+	<-cgv.finished
 }
 
 func noSleep(context.Context, time.Duration) error { return nil }
@@ -122,9 +248,17 @@ func (s *fakeStore) RecordPollRun(_ context.Context, run database.PollRun) error
 	return nil
 }
 
-type fakeDelivery struct{ calls int }
+type fakeDelivery struct {
+	mu    sync.Mutex
+	calls int
+}
 
-func (d *fakeDelivery) DeliverPending(context.Context) error { d.calls++; return nil }
+func (d *fakeDelivery) DeliverPending(context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls++
+	return nil
+}
 
 type fakeProvider struct {
 	id        domain.ProviderID
@@ -146,4 +280,94 @@ func (p *fakeProvider) FetchBranchSnapshot(context.Context, domain.Branch) ([]do
 		<-p.release
 	}
 	return p.showtimes, p.err
+}
+
+type fakePreparedPoll struct {
+	mu         sync.Mutex
+	fetchCalls int
+	closeCalls int
+	showtimes  []domain.Showtime
+}
+
+func (p *fakePreparedPoll) Fetch(context.Context) ([]domain.Showtime, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.fetchCalls++
+	return p.showtimes, nil
+}
+func (p *fakePreparedPoll) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closeCalls++
+	return nil
+}
+
+type fakePreparingProvider struct {
+	id           domain.ProviderID
+	prepareCalls int
+	poll         fakePreparedPoll
+}
+
+func (p *fakePreparingProvider) ID() domain.ProviderID { return p.id }
+func (p *fakePreparingProvider) FetchBranchSnapshot(context.Context, domain.Branch) ([]domain.Showtime, error) {
+	return p.poll.showtimes, nil
+}
+func (p *fakePreparingProvider) PrepareBranch(context.Context, domain.Branch) (domain.PreparedBranchPoll, error) {
+	p.prepareCalls++
+	return &p.poll, nil
+}
+
+type blockingPreparingProvider struct {
+	id               domain.ProviderID
+	started          chan struct{}
+	normalFetchCalls int
+}
+
+func (p *blockingPreparingProvider) ID() domain.ProviderID { return p.id }
+func (p *blockingPreparingProvider) FetchBranchSnapshot(context.Context, domain.Branch) ([]domain.Showtime, error) {
+	p.normalFetchCalls++
+	return nil, nil
+}
+func (p *blockingPreparingProvider) PrepareBranch(ctx context.Context, _ domain.Branch) (domain.PreparedBranchPoll, error) {
+	close(p.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+type unresponsivePreparingProvider struct {
+	id       domain.ProviderID
+	started  chan struct{}
+	release  chan struct{}
+	finished chan struct{}
+}
+
+func (p *unresponsivePreparingProvider) ID() domain.ProviderID { return p.id }
+func (p *unresponsivePreparingProvider) FetchBranchSnapshot(context.Context, domain.Branch) ([]domain.Showtime, error) {
+	return nil, nil
+}
+func (p *unresponsivePreparingProvider) PrepareBranch(context.Context, domain.Branch) (domain.PreparedBranchPoll, error) {
+	close(p.started)
+	<-p.release
+	close(p.finished)
+	return nil, errors.New("Lightpanda stopped responding")
+}
+
+type fakeClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	sleeps []time.Duration
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+func (c *fakeClock) Sleep(_ context.Context, duration time.Duration) error {
+	c.mu.Lock()
+	c.sleeps = append(c.sleeps, duration)
+	c.now = c.now.Add(duration)
+	c.mu.Unlock()
+	runtime.Gosched()
+	return nil
 }

@@ -42,3 +42,60 @@ func TestFetchBranchSnapshotRejectsRowsMissingStableIdentityBeforeFiltering(t *t
 		t.Fatal("expected missing site identity error")
 	}
 }
+
+func TestPrepareBranchReturnsReusablePoll(t *testing.T) {
+	session := &preparedTransportFixture{fakeTransport: fakeTransport{
+		dateValues: []string{"20260719"},
+		showtimeValues: []showtimeResponse{{
+			SiteNo: "0013", MovNo: "m1", MovNm: "호프", TcscnsGradCd: "03",
+			ScnYmd: "20260719", ScnsNo: "001", ScnSseq: "2", ScnsrtTm: "1910",
+		}},
+	}}
+	opener := &openingTransportFixture{session: session}
+	provider := newProvider(opener, time.Now)
+
+	poll, err := provider.PrepareBranch(context.Background(), domain.Branch{Provider: domain.ProviderCGV, TheaterID: "0013"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer poll.Close()
+	if _, err := poll.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poll.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if opener.openCalls != 1 || session.closeCalls != 0 {
+		t.Fatalf("open=%d close=%d", opener.openCalls, session.closeCalls)
+	}
+	poll.Close()
+	if session.closeCalls != 1 {
+		t.Fatalf("close=%d", session.closeCalls)
+	}
+}
+
+type preparedTransportFixture struct {
+	fakeTransport
+	closeCalls int
+}
+
+func (t *preparedTransportFixture) Close() error {
+	t.closeCalls++
+	return nil
+}
+
+type openingTransportFixture struct {
+	session   *preparedTransportFixture
+	openCalls int
+}
+
+func (t *openingTransportFixture) dates(ctx context.Context, theaterID string) ([]string, error) {
+	return t.session.dates(ctx, theaterID)
+}
+func (t *openingTransportFixture) showtimes(ctx context.Context, theaterID, playDate string) ([]showtimeResponse, error) {
+	return t.session.showtimes(ctx, theaterID, playDate)
+}
+func (t *openingTransportFixture) open(context.Context) (preparedTransport, error) {
+	t.openCalls++
+	return t.session, nil
+}

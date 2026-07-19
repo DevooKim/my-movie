@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"my-movie/internal/domain"
@@ -15,6 +16,15 @@ import (
 type transport interface {
 	dates(context.Context, string) ([]string, error)
 	showtimes(context.Context, string, string) ([]showtimeResponse, error)
+}
+
+type preparedTransport interface {
+	transport
+	Close() error
+}
+
+type sessionOpener interface {
+	open(context.Context) (preparedTransport, error)
 }
 
 type Provider struct {
@@ -33,16 +43,79 @@ func newProvider(transport transport, now func() time.Time) *Provider {
 }
 func (p *Provider) ID() domain.ProviderID { return domain.ProviderCGV }
 func (p *Provider) FetchBranchSnapshot(ctx context.Context, branch domain.Branch) ([]domain.Showtime, error) {
+	if opener, ok := p.transport.(sessionOpener); ok {
+		prepared, err := opener.open(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer prepared.Close()
+		return p.fetchWithTransport(ctx, branch, prepared)
+	}
+	return p.fetchWithTransport(ctx, branch, p.transport)
+}
+
+func (p *Provider) PrepareBranch(ctx context.Context, branch domain.Branch) (domain.PreparedBranchPoll, error) {
 	if branch.Provider != domain.ProviderCGV {
 		return nil, fmt.Errorf("cgv branch %q belongs to provider %q", branch.TheaterID, branch.Provider)
 	}
-	dates, err := p.transport.dates(ctx, branch.TheaterID)
+	if opener, ok := p.transport.(sessionOpener); ok {
+		prepared, err := opener.open(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &preparedBranchPoll{provider: p, branch: branch, transport: prepared, close: prepared.Close}, nil
+	}
+	return &preparedBranchPoll{provider: p, branch: branch, transport: p.transport, close: func() error { return nil }}, nil
+}
+
+type preparedBranchPoll struct {
+	provider  *Provider
+	branch    domain.Branch
+	transport transport
+	close     func() error
+
+	mu          sync.Mutex
+	terminalErr error
+	closed      bool
+}
+
+func (p *preparedBranchPoll) Fetch(ctx context.Context) ([]domain.Showtime, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil, fmt.Errorf("cgv prepared poll is closed")
+	}
+	if p.terminalErr != nil {
+		return nil, p.terminalErr
+	}
+	showtimes, err := p.provider.fetchWithTransport(ctx, p.branch, p.transport)
+	if err != nil {
+		p.terminalErr = err
+	}
+	return showtimes, err
+}
+
+func (p *preparedBranchPoll) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+	p.closed = true
+	return p.close()
+}
+
+func (p *Provider) fetchWithTransport(ctx context.Context, branch domain.Branch, source transport) ([]domain.Showtime, error) {
+	if branch.Provider != domain.ProviderCGV {
+		return nil, fmt.Errorf("cgv branch %q belongs to provider %q", branch.TheaterID, branch.Provider)
+	}
+	dates, err := source.dates(ctx, branch.TheaterID)
 	if err != nil {
 		return nil, err
 	}
 	byID := map[string]domain.Showtime{}
 	for _, date := range dates {
-		rows, err := p.transport.showtimes(ctx, branch.TheaterID, date)
+		rows, err := source.showtimes(ctx, branch.TheaterID, date)
 		if err != nil {
 			return nil, err
 		}

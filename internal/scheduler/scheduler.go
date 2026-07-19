@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +15,12 @@ import (
 )
 
 var ErrCycleRunning = errors.New("poll cycle is already running")
+
+const (
+	prewarmLead = 10 * time.Second
+	burstStep   = 5 * time.Second
+	burstWindow = 30 * time.Second
+)
 
 type Store interface {
 	ListTargetStates(context.Context) ([]database.TargetState, error)
@@ -32,7 +37,6 @@ type DeliveryService interface{ DeliverPending(context.Context) error }
 
 type Options struct {
 	Interval time.Duration
-	Jitter   func() time.Duration
 	Sleep    func(context.Context, time.Duration) error
 	Now      func() time.Time
 }
@@ -42,7 +46,6 @@ type Scheduler struct {
 	delivery  DeliveryService
 	providers map[domain.ProviderID]BranchProvider
 	interval  time.Duration
-	jitter    func() time.Duration
 	sleep     func(context.Context, time.Duration) error
 	now       func() time.Time
 	running   atomic.Bool
@@ -55,10 +58,6 @@ func New(store Store, delivery DeliveryService, providers map[domain.ProviderID]
 	if interval == 0 {
 		interval = 5 * time.Minute
 	}
-	jitter := options.Jitter
-	if jitter == nil {
-		jitter = func() time.Duration { return JitterFrom(rand.Float64) }
-	}
 	sleep := options.Sleep
 	if sleep == nil {
 		sleep = sleepContext
@@ -67,7 +66,7 @@ func New(store Store, delivery DeliveryService, providers map[domain.ProviderID]
 	if now == nil {
 		now = time.Now
 	}
-	return &Scheduler{store: store, delivery: delivery, providers: providers, interval: interval, jitter: jitter, sleep: sleep, now: now}
+	return &Scheduler{store: store, delivery: delivery, providers: providers, interval: interval, sleep: sleep, now: now}
 }
 
 type branchGroup struct {
@@ -117,6 +116,185 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 	return errors.Join(cycleErrs...)
 }
 
+type preparedGroup struct {
+	group    branchGroup
+	provider BranchProvider
+	poll     domain.PreparedBranchPoll
+	err      error
+	ready    <-chan preparationResult
+	done     <-chan struct{}
+}
+
+type preparationResult struct {
+	poll domain.PreparedBranchPoll
+	err  error
+}
+
+func (s *Scheduler) runBurst(ctx context.Context, boundary time.Time) error {
+	if !s.running.CompareAndSwap(false, true) {
+		return ErrCycleRunning
+	}
+	releaseRunning := true
+	defer func() {
+		if releaseRunning {
+			s.running.Store(false)
+		}
+	}()
+
+	states, err := s.store.ListTargetStates(ctx)
+	if err != nil {
+		return err
+	}
+	groups, err := enabledBranchGroups(states)
+	if err != nil {
+		return err
+	}
+	prepareCtx, cancelPreparation := context.WithCancel(ctx)
+	prepared, preparationErr := s.prepareGroups(prepareCtx, groups)
+	defer func() {
+		cancelPreparation()
+		closePreparedPolls(prepared)
+		if preparationsDone(prepared) {
+			return
+		}
+		releaseRunning = false
+		go func() {
+			waitForPreparations(prepared)
+			s.running.Store(false)
+		}()
+	}()
+
+	cycleErr := preparationErr
+	for _, offset := range burstOffsets() {
+		due := boundary.Add(offset)
+		now := s.now()
+		if due.Before(now) {
+			continue
+		}
+		if wait := due.Sub(now); wait > 0 {
+			if err := s.sleep(ctx, wait); err != nil {
+				return errors.Join(cycleErr, err)
+			}
+		}
+		cycleErr = errors.Join(cycleErr, s.runBurstAttempt(ctx, prepared))
+	}
+	return cycleErr
+}
+
+func closePreparedPolls(groups []preparedGroup) {
+	for _, group := range groups {
+		if group.poll != nil {
+			_ = group.poll.Close()
+		}
+	}
+}
+
+func preparationsDone(groups []preparedGroup) bool {
+	for _, group := range groups {
+		if group.done == nil {
+			continue
+		}
+		select {
+		case <-group.done:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func waitForPreparations(groups []preparedGroup) {
+	for _, group := range groups {
+		if group.done != nil {
+			<-group.done
+		}
+	}
+}
+
+func (s *Scheduler) prepareGroups(ctx context.Context, groups []branchGroup) ([]preparedGroup, error) {
+	prepared := make([]preparedGroup, 0, len(groups))
+	var preparationErr error
+	for _, group := range groups {
+		provider, ok := s.providers[group.branch.Provider]
+		if !ok {
+			err := fmt.Errorf("provider %q is unavailable", group.branch.Provider)
+			prepared = append(prepared, preparedGroup{group: group, err: err})
+			preparationErr = errors.Join(preparationErr, err, s.recordRun(ctx, group.branch, s.now(), nil, err))
+			continue
+		}
+		item := preparedGroup{group: group, provider: provider}
+		preparer, ok := provider.(domain.BranchPreparer)
+		if ok {
+			ready := make(chan preparationResult)
+			done := make(chan struct{})
+			item.ready = ready
+			item.done = done
+			go func(preparer domain.BranchPreparer, branch domain.Branch, ready chan<- preparationResult) {
+				defer close(done)
+				poll, err := preparer.PrepareBranch(ctx, branch)
+				result := preparationResult{poll: poll, err: err}
+				select {
+				case ready <- result:
+				case <-ctx.Done():
+					if poll != nil {
+						_ = poll.Close()
+					}
+				}
+			}(preparer, group.branch, ready)
+		}
+		prepared = append(prepared, item)
+	}
+	return prepared, preparationErr
+}
+
+func (s *Scheduler) runBurstAttempt(ctx context.Context, groups []preparedGroup) error {
+	cycleErr := s.collectPreparedGroups(ctx, groups)
+	completed := make(chan error, len(groups))
+	count := 0
+	for _, group := range groups {
+		if group.err != nil || group.ready != nil {
+			continue
+		}
+		group := group
+		count++
+		go func() { completed <- s.pollPreparedBranch(ctx, group) }()
+	}
+	for range count {
+		cycleErr = errors.Join(cycleErr, <-completed)
+		cycleErr = errors.Join(cycleErr, s.delivery.DeliverPending(ctx))
+	}
+	return cycleErr
+}
+
+func (s *Scheduler) collectPreparedGroups(ctx context.Context, groups []preparedGroup) error {
+	var preparationErr error
+	for index := range groups {
+		if groups[index].ready == nil {
+			continue
+		}
+		select {
+		case result := <-groups[index].ready:
+			groups[index].ready = nil
+			groups[index].poll = result.poll
+			groups[index].err = result.err
+			if result.err != nil {
+				preparationErr = errors.Join(preparationErr, result.err, s.recordRun(ctx, groups[index].group.branch, s.now(), nil, result.err))
+			}
+		default:
+		}
+	}
+	return preparationErr
+}
+
+func (s *Scheduler) pollPreparedBranch(ctx context.Context, group preparedGroup) error {
+	if group.poll != nil {
+		return s.pollBranchWithFetch(ctx, group.group, group.poll.Fetch)
+	}
+	return s.pollBranchWithFetch(ctx, group.group, func(ctx context.Context) ([]domain.Showtime, error) {
+		return group.provider.FetchBranchSnapshot(ctx, group.group.branch)
+	})
+}
+
 func enabledBranchGroups(states []database.TargetState) ([]branchGroup, error) {
 	byKey := map[string]*branchGroup{}
 	for _, state := range states {
@@ -146,16 +324,19 @@ func enabledBranchGroups(states []database.TargetState) ([]branchGroup, error) {
 }
 
 func (s *Scheduler) pollBranch(ctx context.Context, group branchGroup) error {
-	startedAt := s.now()
-	if err := s.sleep(ctx, s.jitter()); err != nil {
-		return err
-	}
 	provider, ok := s.providers[group.branch.Provider]
 	if !ok {
 		err := fmt.Errorf("provider %q is unavailable", group.branch.Provider)
-		return errors.Join(err, s.recordRun(ctx, group.branch, startedAt, nil, err))
+		return errors.Join(err, s.recordRun(ctx, group.branch, s.now(), nil, err))
 	}
-	showtimes, fetchErr := provider.FetchBranchSnapshot(ctx, group.branch)
+	return s.pollBranchWithFetch(ctx, group, func(ctx context.Context) ([]domain.Showtime, error) {
+		return provider.FetchBranchSnapshot(ctx, group.branch)
+	})
+}
+
+func (s *Scheduler) pollBranchWithFetch(ctx context.Context, group branchGroup, fetch func(context.Context) ([]domain.Showtime, error)) error {
+	startedAt := s.now()
+	showtimes, fetchErr := fetch(ctx)
 	resultErr := fetchErr
 	if fetchErr == nil {
 		for _, enabled := range group.targets {
@@ -197,32 +378,43 @@ func (s *Scheduler) Start(parent context.Context) {
 	s.done = make(chan struct{})
 	go func() {
 		defer close(s.done)
-		nextRun := nextBoundary(s.now(), s.interval)
-		if err := s.sleep(ctx, nextRun.Sub(s.now())); err != nil {
-			return
-		}
-		if err := s.RunOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error("poll cycle failed", "error", err)
-		}
-		ticker := time.NewTicker(s.interval)
-		defer ticker.Stop()
+		boundary := burstBoundary(s.now(), s.interval)
 		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := s.RunOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
-					slog.Error("poll cycle failed", "error", err)
+			prepareAt := boundary.Add(-prewarmLead)
+			if wait := prepareAt.Sub(s.now()); wait > 0 {
+				if err := s.sleep(ctx, wait); err != nil {
+					return
 				}
 			}
+			if err := s.runBurst(ctx, boundary); err != nil {
+				if errors.Is(err, ErrCycleRunning) {
+					boundary = boundary.Add(s.interval)
+					continue
+				}
+				if !errors.Is(err, context.Canceled) {
+					slog.Error("poll burst failed", "error", err)
+				}
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			boundary = burstBoundary(s.now().Add(time.Nanosecond), s.interval)
 		}
 	}()
 }
 
-func nextBoundary(now time.Time, interval time.Duration) time.Time {
+func burstOffsets() []time.Duration {
+	offsets := make([]time.Duration, 0, int(burstWindow/burstStep)+1)
+	for offset := time.Duration(0); offset <= burstWindow; offset += burstStep {
+		offsets = append(offsets, offset)
+	}
+	return offsets
+}
+
+func burstBoundary(now time.Time, interval time.Duration) time.Time {
 	boundary := now.Truncate(interval)
-	if boundary.Equal(now) {
-		return now
+	if now.Sub(boundary) <= burstWindow {
+		return boundary
 	}
 	return boundary.Add(interval)
 }
@@ -240,17 +432,6 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-}
-
-func JitterFrom(random func() float64) time.Duration {
-	value := random()
-	if value < 0 {
-		value = 0
-	}
-	if value > 1 {
-		value = 1
-	}
-	return time.Duration(value * float64(10*time.Second))
 }
 
 func sleepContext(ctx context.Context, duration time.Duration) error {

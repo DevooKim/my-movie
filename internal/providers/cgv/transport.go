@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +17,15 @@ const cgvOrigin = "https://cgv.co.kr"
 
 type cdpTransport struct{ endpoint string }
 
+type cdpSession struct {
+	connection *websocket.Conn
+	client     *cdpClient
+	targetID   string
+	sessionID  string
+	closeOnce  sync.Once
+	closeErr   error
+}
+
 func newCDPTransport(endpoint string) *cdpTransport {
 	if endpoint == "" {
 		endpoint = "http://lightpanda:9222"
@@ -24,9 +34,18 @@ func newCDPTransport(endpoint string) *cdpTransport {
 }
 
 func (t *cdpTransport) dates(ctx context.Context, theaterID string) ([]string, error) {
+	session, err := t.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer session.Close()
+	return session.dates(ctx, theaterID)
+}
+
+func (s *cdpSession) dates(ctx context.Context, theaterID string) ([]string, error) {
 	values := url.Values{"coCd": {"A420"}, "siteNo": {theaterID}}
 	var response apiResponse[[]dateResponse]
-	if err := t.get(ctx, "/api/v1/booking/searchSiteScnscYmdListBySite?"+values.Encode(), &response); err != nil {
+	if err := s.get(ctx, "/api/v1/booking/searchSiteScnscYmdListBySite?"+values.Encode(), &response); err != nil {
 		return nil, err
 	}
 	if response.StatusCode != 0 {
@@ -44,9 +63,18 @@ func (t *cdpTransport) dates(ctx context.Context, theaterID string) ([]string, e
 }
 
 func (t *cdpTransport) showtimes(ctx context.Context, theaterID, playDate string) ([]showtimeResponse, error) {
+	session, err := t.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer session.Close()
+	return session.showtimes(ctx, theaterID, playDate)
+}
+
+func (s *cdpSession) showtimes(ctx context.Context, theaterID, playDate string) ([]showtimeResponse, error) {
 	values := url.Values{"coCd": {"A420"}, "siteNo": {theaterID}, "scnYmd": {playDate}, "rtctlScopCd": {"08"}}
 	var response apiResponse[[]showtimeResponse]
-	if err := t.get(ctx, "/api/v1/booking/searchMovScnInfo?"+values.Encode(), &response); err != nil {
+	if err := s.get(ctx, "/api/v1/booking/searchMovScnInfo?"+values.Encode(), &response); err != nil {
 		return nil, err
 	}
 	if response.StatusCode != 0 {
@@ -55,7 +83,7 @@ func (t *cdpTransport) showtimes(ctx context.Context, theaterID, playDate string
 	return response.Data, nil
 }
 
-func (t *cdpTransport) get(ctx context.Context, path string, output any) error {
+func (t *cdpTransport) open(ctx context.Context) (preparedTransport, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 2*time.Minute)
@@ -63,36 +91,49 @@ func (t *cdpTransport) get(ctx context.Context, path string, output any) error {
 	}
 	wsURL, err := websocketURL(t.endpoint)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	connection, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
-		return fmt.Errorf("connect Lightpanda CDP: %w", err)
+		return nil, fmt.Errorf("connect Lightpanda CDP: %w", err)
 	}
-	defer connection.Close()
 	client := &cdpClient{connection: connection}
 	var created struct {
 		TargetID string `json:"targetId"`
 	}
 	if err := client.call(ctx, "Target.createTarget", map[string]any{"url": cgvOrigin}, "", &created); err != nil {
-		return err
+		connection.Close()
+		return nil, err
 	}
-	defer func() {
+	cleanup := func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = client.call(closeCtx, "Target.closeTarget", map[string]any{"targetId": created.TargetID}, "", &struct{}{})
-	}()
+		_ = connection.Close()
+	}
 	var attached struct {
 		SessionID string `json:"sessionId"`
 	}
 	if err := client.call(ctx, "Target.attachToTarget", map[string]any{"targetId": created.TargetID, "flatten": true}, "", &attached); err != nil {
-		return err
+		cleanup()
+		return nil, err
 	}
 	if err := client.call(ctx, "Page.enable", nil, attached.SessionID, &struct{}{}); err != nil {
-		return err
+		cleanup()
+		return nil, err
 	}
 	if err := client.call(ctx, "Page.navigate", map[string]any{"url": cgvOrigin}, attached.SessionID, &struct{}{}); err != nil {
-		return err
+		cleanup()
+		return nil, err
+	}
+	return &cdpSession{connection: connection, client: client, targetID: created.TargetID, sessionID: attached.SessionID}, nil
+}
+
+func (s *cdpSession) get(ctx context.Context, path string, output any) error {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
 	}
 	expression := "fetch(" + strconvQuote(cgvOrigin+path) + ").then(async r => { if (!r.ok) throw new Error('HTTP ' + r.status); return await r.text(); })"
 	var evaluated struct {
@@ -103,7 +144,7 @@ func (t *cdpTransport) get(ctx context.Context, path string, output any) error {
 	}
 	var evaluateErr error
 	for attempt := 0; attempt < 10; attempt++ {
-		evaluateErr = client.call(ctx, "Runtime.evaluate", map[string]any{"expression": expression, "awaitPromise": true, "returnByValue": true}, attached.SessionID, &evaluated)
+		evaluateErr = s.client.call(ctx, "Runtime.evaluate", map[string]any{"expression": expression, "awaitPromise": true, "returnByValue": true}, s.sessionID, &evaluated)
 		if evaluateErr == nil || !strings.Contains(evaluateErr.Error(), "Cannot find context") {
 			break
 		}
@@ -130,6 +171,18 @@ func (t *cdpTransport) get(ctx context.Context, path string, output any) error {
 		return fmt.Errorf("decode CGV response: %w", err)
 	}
 	return nil
+}
+
+func (s *cdpSession) Close() error {
+	s.closeOnce.Do(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.closeErr = s.client.call(closeCtx, "Target.closeTarget", map[string]any{"targetId": s.targetID}, "", &struct{}{})
+		if err := s.connection.Close(); err != nil && s.closeErr == nil {
+			s.closeErr = err
+		}
+	})
+	return s.closeErr
 }
 
 func websocketURL(endpoint string) (string, error) {
