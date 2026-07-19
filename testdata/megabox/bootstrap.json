@@ -1,0 +1,17 @@
+{
+  "statCd": 0,
+  "msg": "ok",
+  "movieList": [
+    {"movieNo": "m1", "movieNm": "Sample Movie"},
+    {"movieNo": "m2", "movieNm": "Another Film"}
+  ],
+  "areaBrchList": [
+    {"brchNo": "1372", "brchNm": "Gangnam", "areaCd": "10", "brchFormAt": "Y"},
+    {"brchNo": "1351", "brchNm": "COEX", "areaCd": "10", "brchFormAt": "Y"}
+  ],
+  "movieFormDeList": [
+    {"playDe": "20260719", "formAt": "Y"},
+    {"playDe": "20260720", "formAt": "Y"}
+  ],
+  "movieFormList": []
+}
