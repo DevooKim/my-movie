@@ -6,7 +6,8 @@
     {"playDe": "20260720", "formAt": "Y"}
   ],
   "movieFormList": [
-    {"playSchdlNo": "schedule-1", "brchNo": "1372", "movieNo": "m1-detail", "rpstMovieNo": "m1", "playDe": "20260719", "playStartTime": "14:00", "theabExpoNm": "6관", "bokdAbleAt": "Y"},
-    {"playSchdlNo": "schedule-duplicate", "brchNo": "1372", "movieNo": "m1-detail", "rpstMovieNo": "m1", "playDe": "20260719", "playStartTime": "18:30", "theabExpoNm": "7관", "bokdAbleAt": "N"}
+    {"playSchdlNo": "schedule-1", "brchNo": "1372", "movieNo": "m1-detail", "rpstMovieNo": "m1", "playDe": "20260719", "playStartTime": "14:00", "theabExpoNm": "6관", "theabKindCd": "DBC", "bokdAbleAt": "Y"},
+    {"playSchdlNo": "schedule-duplicate", "brchNo": "1372", "movieNo": "m1-detail", "rpstMovieNo": "m1", "playDe": "20260719", "playStartTime": "18:30", "theabExpoNm": "7관", "theabKindCd": "REG", "bokdAbleAt": "N"},
+    {"playSchdlNo": "schedule-regular", "brchNo": "1372", "movieNo": "m1-detail", "rpstMovieNo": "m1", "playDe": "20260719", "playStartTime": "20:30", "theabExpoNm": "8관", "theabKindCd": "REG", "bokdAbleAt": "Y"}
   ]
 }

@@ -38,14 +38,15 @@ func TestSearchCatalogIsCaseInsensitive(t *testing.T) {
 
 func TestFetchShowtimesQueriesAllBookableDatesAndNormalizes(t *testing.T) {
 	provider, transport := newFixtureProvider(t)
+	target := fixtureTarget()
 
-	got, err := provider.FetchShowtimes(context.Background(), "1372", "m1")
+	got, err := provider.FetchShowtimes(context.Background(), target, "m1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []domain.Showtime{
-		{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1", ExternalID: "schedule-1", PlayDate: "2026-07-19", StartsAt: "14:00", Auditorium: "6관"},
-		{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1", ExternalID: "schedule-2", PlayDate: "2026-07-20", StartsAt: "10:10", Auditorium: "5관"},
+		{Provider: domain.ProviderMegabox, TargetID: target.ID, TheaterID: "1372", MovieID: "m1", ExternalID: "schedule-1", PlayDate: "2026-07-19", StartsAt: "14:00", Auditorium: "6관"},
+		{Provider: domain.ProviderMegabox, TargetID: target.ID, TheaterID: "1372", MovieID: "m1", ExternalID: "schedule-2", PlayDate: "2026-07-20", StartsAt: "10:10", Auditorium: "5관"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("showtimes=%+v want=%+v", got, want)
@@ -60,11 +61,20 @@ func TestFetchShowtimesRejectsMalformedSuccess(t *testing.T) {
 	transport.selectedByDate["20260719"] = bookingResponse{
 		StatCd:          0,
 		MovieFormDeList: []dateResponse{{PlayDe: "20260719", FormAt: "Y"}},
-		MovieFormList:   []scheduleResponse{{PlaySchdlNo: "", BrchNo: "1372", RpstMovieNo: "m1", PlayDe: "20260719", PlayStartTime: "14:00", TheabExpoNm: "6관", BokdAbleAt: "Y"}},
+		MovieFormList:   []scheduleResponse{{PlaySchdlNo: "", BrchNo: "1372", RpstMovieNo: "m1", PlayDe: "20260719", PlayStartTime: "14:00", TheabExpoNm: "6관", TheabKindCd: "DBC", BokdAbleAt: "Y"}},
 	}
 
-	if _, err := provider.FetchShowtimes(context.Background(), "1372", "m1"); err == nil {
+	if _, err := provider.FetchShowtimes(context.Background(), fixtureTarget(), "m1"); err == nil {
 		t.Fatal("expected malformed response error")
+	}
+}
+
+func TestFetchShowtimesRejectsDifferentProviderTarget(t *testing.T) {
+	provider, _ := newFixtureProvider(t)
+	target := fixtureTarget()
+	target.Provider = domain.ProviderCGV
+	if _, err := provider.FetchShowtimes(context.Background(), target, "m1"); err == nil {
+		t.Fatal("expected provider mismatch error")
 	}
 }
 
@@ -72,7 +82,7 @@ func TestFetchShowtimesRejectsSuccessWithoutSelectedPayload(t *testing.T) {
 	provider, transport := newFixtureProvider(t)
 	transport.selectedByDate["20260719"] = bookingResponse{StatCd: 0, Message: "ok"}
 
-	if _, err := provider.FetchShowtimes(context.Background(), "1372", "m1"); err == nil {
+	if _, err := provider.FetchShowtimes(context.Background(), fixtureTarget(), "m1"); err == nil {
 		t.Fatal("expected missing selected payload error")
 	}
 }
@@ -82,11 +92,11 @@ func TestFetchShowtimesValidatesIdentityBeforeFiltering(t *testing.T) {
 	malformed := transport.selectedByDate["20260719"]
 	malformed.MovieFormList = []scheduleResponse{{
 		PlaySchdlNo: "schedule-1", BrchNo: "", MovieNo: "m1-detail", RpstMovieNo: "m1",
-		PlayDe: "20260719", PlayStartTime: "14:00", TheabExpoNm: "6관", BokdAbleAt: "Y",
+		PlayDe: "20260719", PlayStartTime: "14:00", TheabExpoNm: "6관", TheabKindCd: "DBC", BokdAbleAt: "Y",
 	}}
 	transport.selectedByDate["20260719"] = malformed
 
-	if _, err := provider.FetchShowtimes(context.Background(), "1372", "m1"); err == nil {
+	if _, err := provider.FetchShowtimes(context.Background(), fixtureTarget(), "m1"); err == nil {
 		t.Fatal("expected missing schedule identity error")
 	}
 }
@@ -111,7 +121,9 @@ func TestNormalizeScheduleDateTimeRejectsInvalidExtendedTime(t *testing.T) {
 
 func TestBookingLinksAreOfficialHTTPSAndEncodeIdentifiers(t *testing.T) {
 	provider, _ := newFixtureProvider(t)
-	links := provider.BuildBookingLinks("branch/1", "movie 1")
+	target := fixtureTarget()
+	target.Theater.ID = "branch/1"
+	links := provider.BuildBookingLinks(target, "movie 1")
 	for name, raw := range map[string]string{"app": links.App, "web": links.Web} {
 		parsed, err := url.Parse(raw)
 		if err != nil {
@@ -185,8 +197,8 @@ func newFixtureProvider(t *testing.T) (*Provider, *fixtureTransport) {
 		StatCd:          0,
 		MovieFormDeList: selected.MovieFormDeList,
 		MovieFormList: []scheduleResponse{
-			{PlaySchdlNo: "schedule-1", BrchNo: "1372", MovieNo: "m1-detail", RpstMovieNo: "m1", PlayDe: "20260719", PlayStartTime: "14:00", TheabExpoNm: "6관", BokdAbleAt: "Y"},
-			{PlaySchdlNo: "schedule-2", BrchNo: "1372", MovieNo: "m1-detail", RpstMovieNo: "m1", PlayDe: "20260720", PlayStartTime: "10:10", TheabExpoNm: "5관", BokdAbleAt: "Y"},
+			{PlaySchdlNo: "schedule-1", BrchNo: "1372", MovieNo: "m1-detail", RpstMovieNo: "m1", PlayDe: "20260719", PlayStartTime: "14:00", TheabExpoNm: "6관", TheabKindCd: "DBC", BokdAbleAt: "Y"},
+			{PlaySchdlNo: "schedule-2", BrchNo: "1372", MovieNo: "m1-detail", RpstMovieNo: "m1", PlayDe: "20260720", PlayStartTime: "10:10", TheabExpoNm: "5관", TheabKindCd: "DBC", BokdAbleAt: "Y"},
 		},
 	}
 	transport := &fixtureTransport{
@@ -198,6 +210,14 @@ func newFixtureProvider(t *testing.T) (*Provider, *fixtureTransport) {
 	}
 	now := func() time.Time { return time.Date(2026, 7, 19, 12, 0, 0, 0, time.Local) }
 	return newProvider(transport, now), transport
+}
+
+func fixtureTarget() domain.AlertTarget {
+	return domain.AlertTarget{
+		ID: "megabox-test-dolby", Provider: domain.ProviderMegabox,
+		Theater:        domain.Theater{ID: "1372", Name: "Gangnam", AreaCode: "10"},
+		AuditoriumName: "Dolby Cinema", AuditoriumCode: "DBC",
+	}
 }
 
 func readFixture(t *testing.T, name string) bookingResponse {

@@ -71,7 +71,11 @@ func (p *Provider) SearchTheaters(ctx context.Context, query string) ([]domain.T
 	return result, nil
 }
 
-func (p *Provider) FetchShowtimes(ctx context.Context, theaterID, movieID string) ([]domain.Showtime, error) {
+func (p *Provider) FetchShowtimes(ctx context.Context, target domain.AlertTarget, movieID string) ([]domain.Showtime, error) {
+	if target.Provider != domain.ProviderMegabox {
+		return nil, fmt.Errorf("megabox target %q belongs to provider %q", target.ID, target.Provider)
+	}
+	theaterID := target.Theater.ID
 	catalog, err := p.loadCatalog(ctx)
 	if err != nil {
 		return nil, err
@@ -123,7 +127,7 @@ func (p *Provider) FetchShowtimes(ctx context.Context, theaterID, movieID string
 			if err := schedule.validate(); err != nil {
 				return nil, err
 			}
-			if schedule.BokdAbleAt != "Y" || schedule.BrchNo != theaterID || schedule.RpstMovieNo != movieID {
+			if schedule.BokdAbleAt != "Y" || schedule.BrchNo != theaterID || schedule.RpstMovieNo != movieID || schedule.TheabKindCd != target.AuditoriumCode {
 				continue
 			}
 			playDate, startsAt, err := normalizeScheduleDateTime(schedule.PlayDe, schedule.PlayStartTime)
@@ -131,7 +135,7 @@ func (p *Provider) FetchShowtimes(ctx context.Context, theaterID, movieID string
 				return nil, err
 			}
 			byID[schedule.PlaySchdlNo] = domain.Showtime{
-				Provider: domain.ProviderMegabox, TheaterID: theaterID, MovieID: movieID,
+				Provider: domain.ProviderMegabox, TargetID: target.ID, TheaterID: theaterID, MovieID: movieID,
 				ExternalID: schedule.PlaySchdlNo, PlayDate: playDate,
 				StartsAt: startsAt, Auditorium: strings.TrimSpace(schedule.TheabExpoNm),
 			}
@@ -166,8 +170,8 @@ func normalizeScheduleDateTime(playDate, startsAt string) (string, string, error
 	return date.Format("2006-01-02"), fmt.Sprintf("%02d:%02d", hour%24, minute), nil
 }
 
-func (p *Provider) BuildBookingLinks(theaterID, movieID string) domain.BookingLinks {
-	query := url.Values{"rpstMovieNo": {movieID}, "brchNo1": {theaterID}}
+func (p *Provider) BuildBookingLinks(target domain.AlertTarget, movieID string) domain.BookingLinks {
+	query := url.Values{"rpstMovieNo": {movieID}, "brchNo1": {target.Theater.ID}}
 	return domain.BookingLinks{
 		App: "https://m.megabox.co.kr/re/AppOnly/booking?" + query.Encode(),
 		Web: "https://www.megabox.co.kr/booking?" + query.Encode(),

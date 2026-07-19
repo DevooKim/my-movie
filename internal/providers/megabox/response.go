@@ -36,6 +36,7 @@ type scheduleResponse struct {
 	PlayDe        string `json:"playDe"`
 	PlayStartTime string `json:"playStartTime"`
 	TheabExpoNm   string `json:"theabExpoNm"`
+	TheabKindCd   string `json:"theabKindCd"`
 	BokdAbleAt    string `json:"bokdAbleAt"`
 }
 
@@ -78,7 +79,7 @@ func (r bookingResponse) validateSelected() error {
 
 func (s scheduleResponse) validate() error {
 	if s.PlaySchdlNo == "" || s.BrchNo == "" || s.MovieNo == "" || s.RpstMovieNo == "" ||
-		s.PlayDe == "" || s.PlayStartTime == "" || s.TheabExpoNm == "" || s.BokdAbleAt == "" {
+		s.PlayDe == "" || s.PlayStartTime == "" || s.TheabExpoNm == "" || s.TheabKindCd == "" || s.BokdAbleAt == "" {
 		return fmt.Errorf("megabox schedule is missing required fields")
 	}
 	return nil
