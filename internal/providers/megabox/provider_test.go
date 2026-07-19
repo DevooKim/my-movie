@@ -91,6 +91,24 @@ func TestFetchShowtimesValidatesIdentityBeforeFiltering(t *testing.T) {
 	}
 }
 
+func TestNormalizeScheduleDateTimeRollsExtendedHourIntoNextDay(t *testing.T) {
+	playDate, startsAt, err := normalizeScheduleDateTime("20260719", "24:10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if playDate != "2026-07-20" || startsAt != "00:10" {
+		t.Fatalf("playDate=%q startsAt=%q", playDate, startsAt)
+	}
+}
+
+func TestNormalizeScheduleDateTimeRejectsInvalidExtendedTime(t *testing.T) {
+	for _, start := range []string{"24:60", "48:00", "not-a-time"} {
+		if _, _, err := normalizeScheduleDateTime("20260719", start); err == nil {
+			t.Fatalf("start=%q: expected error", start)
+		}
+	}
+}
+
 func TestBookingLinksAreOfficialHTTPSAndEncodeIdentifiers(t *testing.T) {
 	provider, _ := newFixtureProvider(t)
 	links := provider.BuildBookingLinks("branch/1", "movie 1")

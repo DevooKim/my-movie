@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -125,18 +126,14 @@ func (p *Provider) FetchShowtimes(ctx context.Context, theaterID, movieID string
 			if schedule.BokdAbleAt != "Y" || schedule.BrchNo != theaterID || schedule.RpstMovieNo != movieID {
 				continue
 			}
-			playDate, err := time.Parse("20060102", schedule.PlayDe)
+			playDate, startsAt, err := normalizeScheduleDateTime(schedule.PlayDe, schedule.PlayStartTime)
 			if err != nil {
-				return nil, fmt.Errorf("invalid megabox play date %q: %w", schedule.PlayDe, err)
-			}
-			start, err := time.Parse("15:04", schedule.PlayStartTime)
-			if err != nil {
-				return nil, fmt.Errorf("invalid megabox start time %q: %w", schedule.PlayStartTime, err)
+				return nil, err
 			}
 			byID[schedule.PlaySchdlNo] = domain.Showtime{
 				Provider: domain.ProviderMegabox, TheaterID: theaterID, MovieID: movieID,
-				ExternalID: schedule.PlaySchdlNo, PlayDate: playDate.Format("2006-01-02"),
-				StartsAt: start.Format("15:04"), Auditorium: strings.TrimSpace(schedule.TheabExpoNm),
+				ExternalID: schedule.PlaySchdlNo, PlayDate: playDate,
+				StartsAt: startsAt, Auditorium: strings.TrimSpace(schedule.TheabExpoNm),
 			}
 		}
 	}
@@ -150,6 +147,23 @@ func (p *Provider) FetchShowtimes(ctx context.Context, theaterID, movieID string
 		return left < right
 	})
 	return showtimes, nil
+}
+
+func normalizeScheduleDateTime(playDate, startsAt string) (string, string, error) {
+	date, err := time.Parse("20060102", playDate)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid megabox play date %q: %w", playDate, err)
+	}
+	if len(startsAt) != 5 || startsAt[2] != ':' {
+		return "", "", fmt.Errorf("invalid megabox start time %q", startsAt)
+	}
+	hour, hourErr := strconv.Atoi(startsAt[:2])
+	minute, minuteErr := strconv.Atoi(startsAt[3:])
+	if hourErr != nil || minuteErr != nil || hour < 0 || hour >= 48 || minute < 0 || minute >= 60 {
+		return "", "", fmt.Errorf("invalid megabox start time %q", startsAt)
+	}
+	date = date.AddDate(0, 0, hour/24)
+	return date.Format("2006-01-02"), fmt.Sprintf("%02d:%02d", hour%24, minute), nil
 }
 
 func (p *Provider) BuildBookingLinks(theaterID, movieID string) domain.BookingLinks {
