@@ -43,3 +43,9 @@ func migrate(ctx context.Context, database *sql.DB) error {
 	}
 	return transaction.Commit()
 }
+
+func LatestMigrationVersion(ctx context.Context, database *sql.DB) (int, error) {
+	var version int
+	err := database.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version)
+	return version, err
+}
