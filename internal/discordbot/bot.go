@@ -92,8 +92,17 @@ func (b *Bot) handleComponent(session *discordgo.Session, interaction *discordgo
 		if len(data.Values) != 1 {
 			return
 		}
-		b.deferResponse(session, interaction)
+		_ = session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
+		})
 		err = b.controller.SelectTarget(ctx, userID, data.Values[0])
+		if err != nil {
+			_, _ = session.FollowupMessageCreate(interaction.Interaction, true, &discordgo.WebhookParams{
+				Content: "대상을 선택하지 못했습니다: " + err.Error(),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			})
+		}
+		return
 	} else if action, targetID, ok := parseComponentAction(data.CustomID); ok {
 		b.deferResponse(session, interaction)
 		if action == "enable" {
@@ -110,11 +119,6 @@ func (b *Bot) handleComponent(session *discordgo.Session, interaction *discordgo
 	} else {
 		return
 	}
-	content := "대상을 선택했습니다."
-	if err != nil {
-		content = "대상을 선택하지 못했습니다: " + err.Error()
-	}
-	_, _ = session.InteractionResponseEdit(interaction.Interaction, &discordgo.WebhookEdit{Content: &content})
 }
 
 func (b *Bot) deferResponse(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
