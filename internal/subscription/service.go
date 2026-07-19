@@ -2,12 +2,15 @@ package subscription
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"my-movie/internal/database"
 	"my-movie/internal/domain"
 	"my-movie/internal/notification"
 )
+
+var ErrAlreadySubscribed = errors.New("already subscribed")
 
 type RegisterInput = database.CreateSubscriptionInput
 
@@ -28,6 +31,10 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (registered
 	}
 	subscription, err := s.repository.CreateInitializingSubscription(ctx, input)
 	if err != nil {
+		var sqliteError interface{ Code() int }
+		if errors.As(err, &sqliteError) && sqliteError.Code() == 2067 {
+			return database.Subscription{}, fmt.Errorf("%w: %v", ErrAlreadySubscribed, err)
+		}
 		return database.Subscription{}, fmt.Errorf("create subscription: %w", err)
 	}
 	finished := false

@@ -64,6 +64,18 @@ func TestRegisterDeletesInitializingSubscriptionWhenConfirmationFails(t *testing
 	assertNoSubscriptions(t, repository, "u1")
 }
 
+func TestRegisterReturnsAlreadySubscribedForDuplicate(t *testing.T) {
+	service, _, _, closeDatabase := newTestService(t)
+	defer closeDatabase()
+
+	if _, err := service.Register(context.Background(), sampleInput()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Register(context.Background(), sampleInput()); !errors.Is(err, ErrAlreadySubscribed) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 type fakeProvider struct {
 	showtimes []domain.Showtime
 	fetchErr  error
