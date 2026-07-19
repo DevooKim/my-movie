@@ -20,6 +20,7 @@ type Theater struct {
 
 type Showtime struct {
 	Provider   ProviderID
+	TargetID   string
 	TheaterID  string
 	MovieID    string
 	ExternalID string

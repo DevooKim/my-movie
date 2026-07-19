@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 //go:embed migrations/*.sql
@@ -25,19 +27,37 @@ func migrate(ctx context.Context, database *sql.DB) error {
 		return err
 	}
 
-	var count int
-	if err := transaction.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = 1").Scan(&count); err != nil {
+	entries, err := migrationFiles.ReadDir("migrations")
+	if err != nil {
 		return err
 	}
-	if count == 0 {
-		migration, err := migrationFiles.ReadFile("migrations/001_initial.sql")
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		prefix, _, ok := strings.Cut(entry.Name(), "_")
+		if !ok {
+			return fmt.Errorf("invalid migration filename %q", entry.Name())
+		}
+		version, err := strconv.Atoi(prefix)
+		if err != nil {
+			return fmt.Errorf("invalid migration filename %q: %w", entry.Name(), err)
+		}
+		var count int
+		if err := transaction.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", version).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			continue
+		}
+		migration, err := migrationFiles.ReadFile("migrations/" + entry.Name())
 		if err != nil {
 			return err
 		}
 		if _, err := transaction.ExecContext(ctx, string(migration)); err != nil {
-			return fmt.Errorf("apply migration 1: %w", err)
+			return fmt.Errorf("apply migration %d: %w", version, err)
 		}
-		if _, err := transaction.ExecContext(ctx, "INSERT INTO schema_migrations(version, applied_at) VALUES(1, datetime('now'))"); err != nil {
+		if _, err := transaction.ExecContext(ctx, "INSERT INTO schema_migrations(version, applied_at) VALUES(?, datetime('now'))", version); err != nil {
 			return err
 		}
 	}

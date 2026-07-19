@@ -29,14 +29,16 @@ const (
 )
 
 type Subscription struct {
-	ID            string
-	DiscordUserID string
-	Provider      domain.ProviderID
-	Theater       domain.Theater
-	Movie         domain.Movie
-	Status        SubscriptionStatus
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID             string
+	DiscordUserID  string
+	Provider       domain.ProviderID
+	TargetID       string
+	AuditoriumName string
+	Theater        domain.Theater
+	Movie          domain.Movie
+	Status         SubscriptionStatus
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type Delivery struct {
@@ -56,9 +58,9 @@ type PendingDelivery struct {
 }
 
 type PollingGroup struct {
-	Provider  domain.ProviderID
-	TheaterID string
-	MovieID   string
+	Provider domain.ProviderID
+	TargetID string
+	MovieID  string
 }
 
 type PollRun struct {
@@ -71,10 +73,12 @@ type PollRun struct {
 }
 
 type CreateSubscriptionInput struct {
-	DiscordUserID string
-	Provider      domain.ProviderID
-	Theater       domain.Theater
-	Movie         domain.Movie
+	DiscordUserID  string
+	Provider       domain.ProviderID
+	TargetID       string
+	AuditoriumName string
+	Theater        domain.Theater
+	Movie          domain.Movie
 }
 
 type Repository struct {
@@ -90,15 +94,18 @@ func (r *Repository) CreateInitializingSubscription(ctx context.Context, input C
 	now := r.now().UTC()
 	subscription := Subscription{
 		ID: newID(), DiscordUserID: input.DiscordUserID, Provider: input.Provider,
+		TargetID: input.TargetID, AuditoriumName: input.AuditoriumName,
 		Theater: input.Theater, Movie: input.Movie, Status: StatusInitializing,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	_, err := r.database.ExecContext(ctx, `
 		INSERT INTO subscriptions(
-			id, discord_user_id, provider, theater_id, theater_name, theater_area_code,
-			movie_id, movie_name, status, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, discord_user_id, provider, target_id, auditorium_name,
+			theater_id, theater_name, theater_area_code, movie_id, movie_name,
+			status, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		subscription.ID, subscription.DiscordUserID, subscription.Provider,
+		subscription.TargetID, subscription.AuditoriumName,
 		subscription.Theater.ID, subscription.Theater.Name, subscription.Theater.AreaCode,
 		subscription.Movie.ID, subscription.Movie.Name, subscription.Status,
 		formatTime(now), formatTime(now),
@@ -152,9 +159,9 @@ func (r *Repository) ListSubscriptionsByUser(ctx context.Context, userID string)
 
 func (r *Repository) ListActivePollingGroups(ctx context.Context) ([]PollingGroup, error) {
 	rows, err := r.database.QueryContext(ctx, `
-		SELECT DISTINCT provider, theater_id, movie_id
+		SELECT DISTINCT provider, target_id, movie_id
 		FROM subscriptions WHERE status = ?
-		ORDER BY provider, theater_id, movie_id`, StatusActive)
+		ORDER BY provider, target_id, movie_id`, StatusActive)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +169,7 @@ func (r *Repository) ListActivePollingGroups(ctx context.Context) ([]PollingGrou
 	var groups []PollingGroup
 	for rows.Next() {
 		var group PollingGroup
-		if err := rows.Scan(&group.Provider, &group.TheaterID, &group.MovieID); err != nil {
+		if err := rows.Scan(&group.Provider, &group.TargetID, &group.MovieID); err != nil {
 			return nil, err
 		}
 		groups = append(groups, group)
@@ -206,11 +213,11 @@ func (r *Repository) RecordPollRun(ctx context.Context, run PollRun) error {
 	_, err := r.database.ExecContext(ctx, `
 		INSERT INTO poll_runs(
 			id, provider, theater_id, movie_id, started_at, finished_at,
-			succeeded, showtime_count, error_summary
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		newID(), run.Group.Provider, run.Group.TheaterID, run.Group.MovieID,
+			succeeded, showtime_count, error_summary, target_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		newID(), run.Group.Provider, "", run.Group.MovieID,
 		formatTime(run.StartedAt), formatTime(run.FinishedAt), run.Succeeded,
-		run.ShowtimeCount, run.ErrorSummary,
+		run.ShowtimeCount, run.ErrorSummary, run.Group.TargetID,
 	)
 	return err
 }
@@ -241,11 +248,11 @@ func (r *Repository) RecordScan(ctx context.Context, showtimes []domain.Showtime
 		key := domain.ShowtimeKey(showtime)
 		now := formatTime(r.now())
 		if _, err := transaction.ExecContext(ctx, `
-			INSERT INTO showtimes(key, provider, theater_id, movie_id, external_id, play_date, starts_at, auditorium, first_seen_at, last_seen_at)
-			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO showtimes(key, provider, theater_id, movie_id, external_id, play_date, starts_at, auditorium, first_seen_at, last_seen_at, target_id)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(key) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
 			key, showtime.Provider, showtime.TheaterID, showtime.MovieID, showtime.ExternalID,
-			showtime.PlayDate, showtime.StartsAt, showtime.Auditorium, now, now,
+			showtime.PlayDate, showtime.StartsAt, showtime.Auditorium, now, now, showtime.TargetID,
 		); err != nil {
 			return err
 		}
@@ -329,7 +336,8 @@ func (r *Repository) MarkFailedAttempt(ctx context.Context, subscriptionID strin
 
 func (r *Repository) ListPendingDeliveries(ctx context.Context) ([]PendingDelivery, error) {
 	rows, err := r.database.QueryContext(ctx, `
-		SELECT s.id, s.discord_user_id, s.provider, s.theater_id, s.theater_name, s.theater_area_code,
+		SELECT s.id, s.discord_user_id, s.provider, s.target_id, s.auditorium_name,
+		       s.theater_id, s.theater_name, s.theater_area_code,
 		       s.movie_id, s.movie_name, s.status, s.created_at, s.updated_at,
 		       d.showtime_key, st.play_date, st.starts_at, st.auditorium, d.attempt_count
 		FROM notification_deliveries d
@@ -347,6 +355,7 @@ func (r *Repository) ListPendingDeliveries(ctx context.Context) ([]PendingDelive
 		var createdAt, updatedAt string
 		if err := rows.Scan(
 			&delivery.Subscription.ID, &delivery.Subscription.DiscordUserID, &delivery.Subscription.Provider,
+			&delivery.Subscription.TargetID, &delivery.Subscription.AuditoriumName,
 			&delivery.Subscription.Theater.ID, &delivery.Subscription.Theater.Name, &delivery.Subscription.Theater.AreaCode,
 			&delivery.Subscription.Movie.ID, &delivery.Subscription.Movie.Name, &delivery.Subscription.Status,
 			&createdAt, &updatedAt, &delivery.ShowtimeKey, &delivery.PlayDate, &delivery.StartsAt,
@@ -391,9 +400,9 @@ type subscriptionMatch struct{ id string }
 func matchingSubscriptions(ctx context.Context, transaction *sql.Tx, showtime domain.Showtime, baselineID string) ([]subscriptionMatch, error) {
 	rows, err := transaction.QueryContext(ctx, `
 		SELECT id FROM subscriptions
-		WHERE provider = ? AND theater_id = ? AND movie_id = ?
+		WHERE provider = ? AND target_id = ? AND movie_id = ?
 		AND (status = ? OR id = ?)`,
-		showtime.Provider, showtime.TheaterID, showtime.MovieID, StatusActive, baselineID,
+		showtime.Provider, showtime.TargetID, showtime.MovieID, StatusActive, baselineID,
 	)
 	if err != nil {
 		return nil, err
@@ -411,7 +420,8 @@ func matchingSubscriptions(ctx context.Context, transaction *sql.Tx, showtime do
 }
 
 const subscriptionSelect = `
-	SELECT id, discord_user_id, provider, theater_id, theater_name, theater_area_code,
+	SELECT id, discord_user_id, provider, target_id, auditorium_name,
+	       theater_id, theater_name, theater_area_code,
 	       movie_id, movie_name, status, created_at, updated_at
 	FROM subscriptions`
 
@@ -422,6 +432,7 @@ func scanSubscription(row scanner) (Subscription, error) {
 	var createdAt, updatedAt string
 	err := row.Scan(
 		&subscription.ID, &subscription.DiscordUserID, &subscription.Provider,
+		&subscription.TargetID, &subscription.AuditoriumName,
 		&subscription.Theater.ID, &subscription.Theater.Name, &subscription.Theater.AreaCode,
 		&subscription.Movie.ID, &subscription.Movie.Name, &subscription.Status, &createdAt, &updatedAt,
 	)

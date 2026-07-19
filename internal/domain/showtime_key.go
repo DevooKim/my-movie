@@ -13,6 +13,7 @@ func ShowtimeKey(showtime Showtime) string {
 
 	identity := strings.Join([]string{
 		string(showtime.Provider),
+		strings.TrimSpace(showtime.TargetID),
 		strings.TrimSpace(showtime.TheaterID),
 		strings.TrimSpace(showtime.MovieID),
 		strings.TrimSpace(showtime.PlayDate),
