@@ -132,6 +132,51 @@ func TestOpenPersistsSubscriptionAcrossReopen(t *testing.T) {
 	}
 }
 
+func TestListActivePollingGroupsDeduplicatesMatchingSubscriptions(t *testing.T) {
+	repository, closeDatabase := newTestRepository(t)
+	defer closeDatabase()
+	ctx := context.Background()
+	for _, userID := range []string{"u1", "u2"} {
+		subscription, err := repository.CreateInitializingSubscription(ctx, subscriptionInput(userID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repository.ActivateSubscription(ctx, subscription.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	groups, err := repository.ListActivePollingGroups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0] != (PollingGroup{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1"}) {
+		t.Fatalf("groups=%+v", groups)
+	}
+}
+
+func TestRecordPollRunDrivesLatestProviderSuccess(t *testing.T) {
+	repository, closeDatabase := newTestRepository(t)
+	defer closeDatabase()
+	ctx := context.Background()
+	finishedAt := fixedNow.Add(2 * time.Minute)
+	err := repository.RecordPollRun(ctx, PollRun{
+		Group:     PollingGroup{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1"},
+		StartedAt: fixedNow, FinishedAt: finishedAt, Succeeded: true, ShowtimeCount: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	latest, err := repository.LatestSuccessfulPoll(ctx, domain.ProviderMegabox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !latest.Equal(finishedAt) {
+		t.Fatalf("latest=%s want=%s", latest, finishedAt)
+	}
+}
+
 func assertDeliveryStatus(t *testing.T, repository *Repository, subscriptionID, showtimeKey string, want DeliveryStatus) {
 	t.Helper()
 	got, err := repository.GetDeliveryStatus(context.Background(), subscriptionID, showtimeKey)

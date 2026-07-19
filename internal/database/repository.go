@@ -55,6 +55,21 @@ type PendingDelivery struct {
 	AttemptCount int
 }
 
+type PollingGroup struct {
+	Provider  domain.ProviderID
+	TheaterID string
+	MovieID   string
+}
+
+type PollRun struct {
+	Group         PollingGroup
+	StartedAt     time.Time
+	FinishedAt    time.Time
+	Succeeded     bool
+	ShowtimeCount int
+	ErrorSummary  string
+}
+
 type CreateSubscriptionInput struct {
 	DiscordUserID string
 	Provider      domain.ProviderID
@@ -133,6 +148,71 @@ func (r *Repository) ListSubscriptionsByUser(ctx context.Context, userID string)
 		subscriptions = append(subscriptions, subscription)
 	}
 	return subscriptions, rows.Err()
+}
+
+func (r *Repository) ListActivePollingGroups(ctx context.Context) ([]PollingGroup, error) {
+	rows, err := r.database.QueryContext(ctx, `
+		SELECT DISTINCT provider, theater_id, movie_id
+		FROM subscriptions WHERE status = ?
+		ORDER BY provider, theater_id, movie_id`, StatusActive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var groups []PollingGroup
+	for rows.Next() {
+		var group PollingGroup
+		if err := rows.Scan(&group.Provider, &group.TheaterID, &group.MovieID); err != nil {
+			return nil, err
+		}
+		groups = append(groups, group)
+	}
+	return groups, rows.Err()
+}
+
+func (r *Repository) ListActiveProviderIDs(ctx context.Context) ([]domain.ProviderID, error) {
+	rows, err := r.database.QueryContext(ctx, `
+		SELECT DISTINCT provider FROM subscriptions WHERE status = ? ORDER BY provider`, StatusActive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var providers []domain.ProviderID
+	for rows.Next() {
+		var provider domain.ProviderID
+		if err := rows.Scan(&provider); err != nil {
+			return nil, err
+		}
+		providers = append(providers, provider)
+	}
+	return providers, rows.Err()
+}
+
+func (r *Repository) PingContext(ctx context.Context) error { return r.database.PingContext(ctx) }
+
+func (r *Repository) LatestSuccessfulPoll(ctx context.Context, provider domain.ProviderID) (time.Time, error) {
+	var value string
+	err := r.database.QueryRowContext(ctx, `
+		SELECT finished_at FROM poll_runs
+		WHERE provider = ? AND succeeded = 1
+		ORDER BY finished_at DESC LIMIT 1`, provider).Scan(&value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Parse(time.RFC3339Nano, value)
+}
+
+func (r *Repository) RecordPollRun(ctx context.Context, run PollRun) error {
+	_, err := r.database.ExecContext(ctx, `
+		INSERT INTO poll_runs(
+			id, provider, theater_id, movie_id, started_at, finished_at,
+			succeeded, showtime_count, error_summary
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		newID(), run.Group.Provider, run.Group.TheaterID, run.Group.MovieID,
+		formatTime(run.StartedAt), formatTime(run.FinishedAt), run.Succeeded,
+		run.ShowtimeCount, run.ErrorSummary,
+	)
+	return err
 }
 
 func (r *Repository) GetSubscription(ctx context.Context, id string) (Subscription, error) {
