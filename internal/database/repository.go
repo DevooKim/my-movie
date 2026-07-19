@@ -39,6 +39,22 @@ type Subscription struct {
 	UpdatedAt     time.Time
 }
 
+type Delivery struct {
+	SubscriptionID string
+	ShowtimeKey    string
+	Status         DeliveryStatus
+	AttemptCount   int
+}
+
+type PendingDelivery struct {
+	Subscription Subscription
+	ShowtimeKey  string
+	PlayDate     string
+	StartsAt     string
+	Auditorium   string
+	AttemptCount int
+}
+
 type CreateSubscriptionInput struct {
 	DiscordUserID string
 	Provider      domain.ProviderID
@@ -111,6 +127,21 @@ func (r *Repository) ListSubscriptionsByUser(ctx context.Context, userID string)
 	return subscriptions, rows.Err()
 }
 
+func (r *Repository) GetSubscription(ctx context.Context, id string) (Subscription, error) {
+	return scanSubscription(r.database.QueryRowContext(ctx, subscriptionSelect+" WHERE id = ?", id))
+}
+
+func (r *Repository) DisableSubscription(ctx context.Context, id string) error {
+	result, err := r.database.ExecContext(ctx,
+		"UPDATE subscriptions SET status = ?, updated_at = ? WHERE id = ?",
+		StatusDisabled, formatTime(r.now()), id,
+	)
+	if err != nil {
+		return err
+	}
+	return requireChanged(result, "disable subscription")
+}
+
 func (r *Repository) RecordScan(ctx context.Context, showtimes []domain.Showtime, baselineSubscriptionID string) error {
 	transaction, err := r.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -162,6 +193,91 @@ func (r *Repository) MarkSent(ctx context.Context, subscriptionID string, showti
 		}
 	}
 	return nil
+}
+
+func (r *Repository) MarkFailedAttempt(ctx context.Context, subscriptionID string, showtimeKeys []string, message string, permanent bool) error {
+	transaction, err := r.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	for _, key := range showtimeKeys {
+		failed := permanent
+		if !failed {
+			var attempts int
+			if err := transaction.QueryRowContext(ctx, `
+				SELECT attempt_count FROM notification_deliveries
+				WHERE subscription_id = ? AND showtime_key = ? AND status = ?`,
+				subscriptionID, key, DeliveryPending,
+			).Scan(&attempts); err != nil {
+				return err
+			}
+			failed = attempts+1 >= 3
+		}
+		status := DeliveryPending
+		if failed {
+			status = DeliveryFailed
+		}
+		if _, err := transaction.ExecContext(ctx, `
+			UPDATE notification_deliveries
+			SET status = ?, attempt_count = attempt_count + 1, last_attempt_at = ?, last_error = ?
+			WHERE subscription_id = ? AND showtime_key = ? AND status = ?`,
+			status, formatTime(r.now()), message, subscriptionID, key, DeliveryPending,
+		); err != nil {
+			return err
+		}
+	}
+	return transaction.Commit()
+}
+
+func (r *Repository) ListPendingDeliveries(ctx context.Context) ([]PendingDelivery, error) {
+	rows, err := r.database.QueryContext(ctx, `
+		SELECT s.id, s.discord_user_id, s.provider, s.theater_id, s.theater_name, s.theater_area_code,
+		       s.movie_id, s.movie_name, s.status, s.created_at, s.updated_at,
+		       d.showtime_key, st.play_date, st.starts_at, st.auditorium, d.attempt_count
+		FROM notification_deliveries d
+		JOIN subscriptions s ON s.id = d.subscription_id
+		JOIN showtimes st ON st.key = d.showtime_key
+		WHERE d.status = ? AND s.status = ?
+		ORDER BY s.id, st.play_date, st.starts_at, d.showtime_key`, DeliveryPending, StatusActive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var deliveries []PendingDelivery
+	for rows.Next() {
+		var delivery PendingDelivery
+		var createdAt, updatedAt string
+		if err := rows.Scan(
+			&delivery.Subscription.ID, &delivery.Subscription.DiscordUserID, &delivery.Subscription.Provider,
+			&delivery.Subscription.Theater.ID, &delivery.Subscription.Theater.Name, &delivery.Subscription.Theater.AreaCode,
+			&delivery.Subscription.Movie.ID, &delivery.Subscription.Movie.Name, &delivery.Subscription.Status,
+			&createdAt, &updatedAt, &delivery.ShowtimeKey, &delivery.PlayDate, &delivery.StartsAt,
+			&delivery.Auditorium, &delivery.AttemptCount,
+		); err != nil {
+			return nil, err
+		}
+		delivery.Subscription.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		delivery.Subscription.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		deliveries = append(deliveries, delivery)
+	}
+	return deliveries, rows.Err()
+}
+
+func (r *Repository) GetDelivery(ctx context.Context, subscriptionID, showtimeKey string) (Delivery, error) {
+	var delivery Delivery
+	err := r.database.QueryRowContext(ctx, `
+		SELECT subscription_id, showtime_key, status, attempt_count
+		FROM notification_deliveries WHERE subscription_id = ? AND showtime_key = ?`,
+		subscriptionID, showtimeKey,
+	).Scan(&delivery.SubscriptionID, &delivery.ShowtimeKey, &delivery.Status, &delivery.AttemptCount)
+	return delivery, err
 }
 
 func (r *Repository) GetDeliveryStatus(ctx context.Context, subscriptionID, showtimeKey string) (DeliveryStatus, error) {
