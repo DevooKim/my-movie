@@ -110,6 +110,14 @@ func (r *Repository) DeleteSubscription(ctx context.Context, id string) error {
 	return err
 }
 
+func (r *Repository) DeleteAllSubscriptionsByUser(ctx context.Context, userID string) (int64, error) {
+	result, err := r.database.ExecContext(ctx, "DELETE FROM subscriptions WHERE discord_user_id = ?", userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (r *Repository) ListSubscriptionsByUser(ctx context.Context, userID string) ([]Subscription, error) {
 	rows, err := r.database.QueryContext(ctx, subscriptionSelect+" WHERE discord_user_id = ? ORDER BY created_at", userID)
 	if err != nil {
