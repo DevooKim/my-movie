@@ -1,0 +1,86 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+)
+
+const (
+	defaultDatabasePath = "/data/my-movie.sqlite"
+	defaultPollSeconds  = 300
+	defaultPort         = 3000
+	defaultTimezone     = "Asia/Seoul"
+)
+
+type Config struct {
+	DiscordBotToken      string
+	DiscordApplicationID string
+	DiscordGuildID       string
+	DatabasePath         string
+	PollInterval         time.Duration
+	Port                 int
+	Timezone             string
+}
+
+func Load() (Config, error) {
+	botToken, err := required("DISCORD_BOT_TOKEN")
+	if err != nil {
+		return Config{}, err
+	}
+	applicationID, err := required("DISCORD_APPLICATION_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	guildID, err := required("DISCORD_GUILD_ID")
+	if err != nil {
+		return Config{}, err
+	}
+
+	pollSeconds, err := positiveInt("POLL_INTERVAL_SECONDS", defaultPollSeconds)
+	if err != nil {
+		return Config{}, err
+	}
+	port, err := positiveInt("PORT", defaultPort)
+	if err != nil || port > 65535 {
+		return Config{}, fmt.Errorf("PORT must be between 1 and 65535")
+	}
+
+	return Config{
+		DiscordBotToken:      botToken,
+		DiscordApplicationID: applicationID,
+		DiscordGuildID:       guildID,
+		DatabasePath:         valueOrDefault("DATABASE_PATH", defaultDatabasePath),
+		PollInterval:         time.Duration(pollSeconds) * time.Second,
+		Port:                 port,
+		Timezone:             valueOrDefault("TZ", defaultTimezone),
+	}, nil
+}
+
+func required(name string) (string, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return "", fmt.Errorf("%s is required", name)
+	}
+	return value, nil
+}
+
+func positiveInt(name string, fallback int) (int, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return value, nil
+}
+
+func valueOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}

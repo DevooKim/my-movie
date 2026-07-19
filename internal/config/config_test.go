@@ -1,0 +1,69 @@
+package config
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+func setRequiredEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("DISCORD_BOT_TOKEN", "token")
+	t.Setenv("DISCORD_APPLICATION_ID", "123")
+	t.Setenv("DISCORD_GUILD_ID", "456")
+	t.Setenv("DATABASE_PATH", "")
+	t.Setenv("POLL_INTERVAL_SECONDS", "")
+	t.Setenv("PORT", "")
+	t.Setenv("TZ", "")
+}
+
+func TestLoadUsesOperationalDefaults(t *testing.T) {
+	setRequiredEnvironment(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabasePath != "/data/my-movie.sqlite" {
+		t.Fatalf("path=%q", cfg.DatabasePath)
+	}
+	if cfg.PollInterval != 5*time.Minute {
+		t.Fatalf("interval=%s", cfg.PollInterval)
+	}
+	if cfg.Port != 3000 {
+		t.Fatalf("port=%d", cfg.Port)
+	}
+	if cfg.Timezone != "Asia/Seoul" {
+		t.Fatalf("timezone=%q", cfg.Timezone)
+	}
+}
+
+func TestLoadRejectsMissingDiscordToken(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("DISCORD_BOT_TOKEN", "")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "DISCORD_BOT_TOKEN") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestLoadRejectsInvalidPollingInterval(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("POLL_INTERVAL_SECONDS", "0")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "POLL_INTERVAL_SECONDS") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestLoadRejectsInvalidPort(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("PORT", "70000")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "PORT") {
+		t.Fatalf("err=%v", err)
+	}
+}
