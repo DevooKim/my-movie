@@ -16,177 +16,200 @@ var fixedNow = time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 
 func newTestRepository(t *testing.T) (*Repository, func()) {
 	t.Helper()
-	database, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	db, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewRepository(database, func() time.Time { return fixedNow }), func() {
-		if err := database.Close(); err != nil {
+	return NewRepository(db, func() time.Time { return fixedNow }), func() {
+		if err := db.Close(); err != nil {
 			t.Errorf("close database: %v", err)
 		}
 	}
 }
 
-func subscriptionInput(userID string) CreateSubscriptionInput {
-	return CreateSubscriptionInput{
-		DiscordUserID:  userID,
-		Provider:       domain.ProviderMegabox,
-		TargetID:       "megabox-coex-dolby",
-		AuditoriumName: "Dolby Cinema",
-		Theater:        domain.Theater{ID: "1372", Name: "강남", AreaCode: "10"},
-		Movie:          domain.Movie{ID: "m1", Name: "영화"},
-	}
-}
-
-func sampleShowtime(externalID string) domain.Showtime {
-	return domain.Showtime{
-		Provider: domain.ProviderMegabox, TargetID: "megabox-coex-dolby", TheaterID: "1372", MovieID: "m1",
-		ExternalID: externalID, PlayDate: "2026-07-19", StartsAt: "14:00", Auditorium: "6관",
-	}
-}
-
-func TestCreateInitializingSubscriptionRejectsDuplicate(t *testing.T) {
-	repository, closeDatabase := newTestRepository(t)
-	defer closeDatabase()
+func TestInstallationAndTargetStatePersistAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "channel-targets.sqlite")
 	ctx := context.Background()
-
-	if _, err := repository.CreateInitializingSubscription(ctx, subscriptionInput("u1")); err != nil {
+	db, err := Open(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.CreateInitializingSubscription(ctx, subscriptionInput("u1")); err == nil {
-		t.Fatal("expected duplicate subscription error")
+	repository := NewRepository(db, func() time.Time { return fixedNow })
+	installation := Installation{
+		GuildID: "g1", OwnerUserID: "u1", CategoryID: "cat",
+		ControlChannelID: "control", ControlMessageID: "message",
+	}
+	if err := repository.SaveInstallation(ctx, installation); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SaveTargetState(ctx, TargetState{TargetID: "cgv-yongsan-imax", ChannelID: "imax", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	repository = NewRepository(db, func() time.Time { return fixedNow })
+	gotInstallation, err := repository.GetInstallation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotInstallation != installation {
+		t.Fatalf("installation=%+v want=%+v", gotInstallation, installation)
+	}
+	states, err := repository.ListTargetStates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 || states[0].TargetID != "cgv-yongsan-imax" || !states[0].Enabled {
+		t.Fatalf("states=%+v", states)
 	}
 }
 
-func TestCreateInitializingSubscriptionAllowsSameMovieAcrossTargets(t *testing.T) {
+func TestReplaceBaselineAndRecordSnapshotQueueOnlyNewShowtimes(t *testing.T) {
 	repository, closeDatabase := newTestRepository(t)
 	defer closeDatabase()
 	ctx := context.Background()
+	state := TargetState{TargetID: "cgv-yongsan-imax", ChannelID: "imax", Enabled: true}
+	if err := repository.SaveTargetState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ReplaceBaseline(ctx, state.TargetID, []string{"old", "gone"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ReplaceBaseline(ctx, state.TargetID, []string{"old"}); err != nil {
+		t.Fatal(err)
+	}
+	showtimes := []domain.Showtime{
+		{Provider: domain.ProviderCGV, TargetID: state.TargetID, TheaterID: "0013", TheaterName: "용산아이파크몰", MovieID: "m1", MovieName: "호프", ExternalID: "old", PlayDate: "2026-07-19", StartsAt: "19:10", EndsAt: "21:56", Auditorium: "IMAX관", Format: "IMAX", RemainingSeats: 57, TotalSeats: 144, SeatCountKnown: true},
+		{Provider: domain.ProviderCGV, TargetID: state.TargetID, TheaterID: "0013", TheaterName: "용산아이파크몰", MovieID: "m1", MovieName: "호프", ExternalID: "new", PlayDate: "2026-07-19", StartsAt: "22:00", EndsAt: "00:46", Auditorium: "IMAX관", Format: "IMAX"},
+	}
+	if err := repository.RecordTargetSnapshot(ctx, state.TargetID, showtimes); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := repository.ListPendingChannelDeliveries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].Showtime.ExternalID != "new" || pending[0].ChannelID != "imax" || pending[0].Showtime.MovieName != "호프" {
+		t.Fatalf("pending=%+v", pending)
+	}
+}
 
-	for _, targetID := range []string{"cgv-yongsan-imax", "cgv-yongsan-4dx", "cgv-yongsan-screenx"} {
-		input := CreateSubscriptionInput{
-			DiscordUserID: "u1", Provider: domain.ProviderCGV,
-			TargetID: targetID, AuditoriumName: targetID,
-			Theater: domain.Theater{ID: "0013", Name: "용산아이파크몰"},
-			Movie:   domain.Movie{ID: "30001297", Name: "호프"},
+func TestReplaceBaselineDiscardsPendingAlertsFromBeforeReenable(t *testing.T) {
+	repository, closeDatabase := newTestRepository(t)
+	defer closeDatabase()
+	ctx := context.Background()
+	state := TargetState{TargetID: "cgv-yongsan-imax", ChannelID: "imax", Enabled: true}
+	if err := repository.SaveTargetState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	showtime := domain.Showtime{
+		Provider: domain.ProviderCGV, TargetID: state.TargetID, TheaterID: "0013",
+		MovieID: "m1", MovieName: "호프", ExternalID: "opened-before-off",
+		PlayDate: "2026-07-19", StartsAt: "19:10",
+	}
+	if err := repository.RecordTargetSnapshot(ctx, state.TargetID, []domain.Showtime{showtime}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DisableTarget(ctx, state.TargetID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ReplaceBaseline(ctx, state.TargetID, []string{showtime.ExternalID}); err != nil {
+		t.Fatal(err)
+	}
+	state.Enabled = true
+	if err := repository.SaveTargetState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := repository.ListPendingChannelDeliveries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("stale pending alerts=%+v", pending)
+	}
+}
+
+func TestStalePollingGenerationCannotQueueAfterTargetWasToggled(t *testing.T) {
+	repository, closeDatabase := newTestRepository(t)
+	defer closeDatabase()
+	ctx := context.Background()
+	state := TargetState{TargetID: "cgv-yongsan-imax", ChannelID: "imax", Enabled: true}
+	if err := repository.SaveTargetState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	states, err := repository.ListTargetStates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := states[0]
+	state.Enabled = false
+	if err := repository.SaveTargetState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	state.Enabled = true
+	if err := repository.SaveTargetState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	showtime := domain.Showtime{Provider: domain.ProviderCGV, TargetID: state.TargetID, MovieID: "m1", MovieName: "호프", ExternalID: "stale", PlayDate: "2026-07-19", StartsAt: "19:10"}
+	if err := repository.RecordTargetSnapshotForState(ctx, stale, []domain.Showtime{showtime}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := repository.ListPendingChannelDeliveries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("stale poll queued deliveries=%+v", pending)
+	}
+}
+
+func TestEnabledTargetsDriveActiveProviders(t *testing.T) {
+	repository, closeDatabase := newTestRepository(t)
+	defer closeDatabase()
+	ctx := context.Background()
+	for _, state := range []TargetState{
+		{TargetID: "cgv-yongsan-imax", ChannelID: "imax", Enabled: true},
+		{TargetID: "megabox-coex-dolby", ChannelID: "dolby", Enabled: false},
+	} {
+		if err := repository.SaveTargetState(ctx, state); err != nil {
+			t.Fatal(err)
 		}
-		if _, err := repository.CreateInitializingSubscription(ctx, input); err != nil {
-			t.Fatalf("create %s: %v", targetID, err)
-		}
 	}
-
-	duplicate := CreateSubscriptionInput{
-		DiscordUserID: "u1", Provider: domain.ProviderCGV,
-		TargetID: "cgv-yongsan-imax", AuditoriumName: "IMAX",
-		Theater: domain.Theater{ID: "0013", Name: "용산아이파크몰"},
-		Movie:   domain.Movie{ID: "30001297", Name: "호프"},
+	providers, err := repository.ListActiveProviderIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := repository.CreateInitializingSubscription(ctx, duplicate); err == nil {
-		t.Fatal("expected duplicate target subscription error")
+	if len(providers) != 1 || providers[0] != domain.ProviderCGV {
+		t.Fatalf("providers=%v", providers)
 	}
 }
 
-func TestRecordScanKeepsBaselinePerSubscription(t *testing.T) {
+func TestRecordPollRunDrivesLatestProviderSuccess(t *testing.T) {
 	repository, closeDatabase := newTestRepository(t)
 	defer closeDatabase()
 	ctx := context.Background()
-
-	oldSubscription, err := repository.CreateInitializingSubscription(ctx, subscriptionInput("old-user"))
+	finishedAt := fixedNow.Add(2 * time.Minute)
+	err := repository.RecordPollRun(ctx, PollRun{
+		Group:     PollingGroup{Provider: domain.ProviderMegabox, TheaterID: "1351"},
+		StartedAt: fixedNow, FinishedAt: finishedAt, Succeeded: true, ShowtimeCount: 2,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.ActivateSubscription(ctx, oldSubscription.ID); err != nil {
-		t.Fatal(err)
-	}
-	newSubscription, err := repository.CreateInitializingSubscription(ctx, subscriptionInput("new-user"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := repository.RecordScan(ctx, []domain.Showtime{sampleShowtime("s1")}, newSubscription.ID); err != nil {
-		t.Fatal(err)
-	}
-	assertDeliveryStatus(t, repository, oldSubscription.ID, "megabox:s1", DeliveryPending)
-	assertDeliveryStatus(t, repository, newSubscription.ID, "megabox:s1", DeliveryBaseline)
-}
-
-func TestRecordScanDoesNotOverwriteSentDelivery(t *testing.T) {
-	repository, closeDatabase := newTestRepository(t)
-	defer closeDatabase()
-	ctx := context.Background()
-
-	subscription, err := repository.CreateInitializingSubscription(ctx, subscriptionInput("u1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := repository.ActivateSubscription(ctx, subscription.ID); err != nil {
-		t.Fatal(err)
-	}
-	showtime := sampleShowtime("s1")
-	if err := repository.RecordScan(ctx, []domain.Showtime{showtime}, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := repository.MarkSent(ctx, subscription.ID, []string{"megabox:s1"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := repository.RecordScan(ctx, []domain.Showtime{showtime}, ""); err != nil {
-		t.Fatal(err)
-	}
-	assertDeliveryStatus(t, repository, subscription.ID, "megabox:s1", DeliverySent)
-}
-
-func TestMarkSentRollsBackWholeGroupWhenAnyKeyIsMissing(t *testing.T) {
-	repository, closeDatabase := newTestRepository(t)
-	defer closeDatabase()
-	ctx := context.Background()
-	subscription, err := repository.CreateInitializingSubscription(ctx, subscriptionInput("u1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := repository.ActivateSubscription(ctx, subscription.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := repository.RecordScan(ctx, []domain.Showtime{sampleShowtime("s1")}, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := repository.MarkSent(ctx, subscription.ID, []string{"megabox:s1", "megabox:missing"}); err == nil {
-		t.Fatal("expected grouped update error")
-	}
-	assertDeliveryStatus(t, repository, subscription.ID, "megabox:s1", DeliveryPending)
-}
-
-func TestOpenPersistsSubscriptionAcrossReopen(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "persistent.sqlite")
-	ctx := context.Background()
-	database, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository := NewRepository(database, func() time.Time { return fixedNow })
-	if _, err := repository.CreateInitializingSubscription(ctx, subscriptionInput("u1")); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	database, err = Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	repository = NewRepository(database, func() time.Time { return fixedNow })
-	subscriptions, err := repository.ListSubscriptionsByUser(ctx, "u1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(subscriptions) != 1 || subscriptions[0].Movie.ID != "m1" {
-		t.Fatalf("subscriptions=%+v", subscriptions)
+	latest, err := repository.LatestSuccessfulPoll(ctx, domain.ProviderMegabox)
+	if err != nil || !latest.Equal(finishedAt) {
+		t.Fatalf("latest=%s err=%v", latest, err)
 	}
 }
 
-func TestMigrationDisablesLegacySubscriptionAndClearsDeliveries(t *testing.T) {
+func TestMigrationThreePreservesDisabledLegacyRows(t *testing.T) {
 	ctx := context.Background()
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.sqlite"))
 	if err != nil {
@@ -203,87 +226,23 @@ func TestMigrationDisablesLegacySubscriptionAndClearsDeliveries(t *testing.T) {
 	if _, err := db.ExecContext(ctx, string(initial)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations VALUES(1, datetime('now'))`); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO subscriptions VALUES('s1','u1','megabox','1351','코엑스','10','m1','영화','active',datetime('now'),datetime('now'));
-		INSERT INTO showtimes VALUES('megabox:x','megabox','1351','m1','x','2026-07-19','10:00','1관',datetime('now'),datetime('now'));
-		INSERT INTO notification_deliveries VALUES('s1','megabox:x','sent',1,datetime('now'),NULL);`); err != nil {
+		INSERT INTO schema_migrations VALUES(1, datetime('now'));
+		INSERT INTO subscriptions VALUES('s1','u1','megabox','1351','코엑스','10','m1','영화','active',datetime('now'),datetime('now'));`); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrate(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-
-	var status, targetID string
-	if err := db.QueryRowContext(ctx, `SELECT status, target_id FROM subscriptions WHERE id='s1'`).Scan(&status, &targetID); err != nil {
+	var status string
+	if err := db.QueryRowContext(ctx, `SELECT status FROM subscriptions WHERE id='s1'`).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
-	if status != string(StatusDisabled) || targetID != "" {
-		t.Fatalf("status=%q targetID=%q", status, targetID)
+	if status != "disabled" {
+		t.Fatalf("legacy status=%q", status)
 	}
-	var deliveries int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notification_deliveries`).Scan(&deliveries); err != nil {
-		t.Fatal(err)
-	}
-	if deliveries != 0 {
-		t.Fatalf("deliveries=%d", deliveries)
-	}
-}
-
-func TestListActivePollingGroupsDeduplicatesMatchingSubscriptions(t *testing.T) {
-	repository, closeDatabase := newTestRepository(t)
-	defer closeDatabase()
-	ctx := context.Background()
-	for _, userID := range []string{"u1", "u2"} {
-		subscription, err := repository.CreateInitializingSubscription(ctx, subscriptionInput(userID))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := repository.ActivateSubscription(ctx, subscription.ID); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	groups, err := repository.ListActivePollingGroups(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(groups) != 1 || groups[0] != (PollingGroup{Provider: domain.ProviderMegabox, TargetID: "megabox-coex-dolby", MovieID: "m1"}) {
-		t.Fatalf("groups=%+v", groups)
-	}
-}
-
-func TestRecordPollRunDrivesLatestProviderSuccess(t *testing.T) {
-	repository, closeDatabase := newTestRepository(t)
-	defer closeDatabase()
-	ctx := context.Background()
-	finishedAt := fixedNow.Add(2 * time.Minute)
-	err := repository.RecordPollRun(ctx, PollRun{
-		Group:     PollingGroup{Provider: domain.ProviderMegabox, TargetID: "megabox-coex-dolby", MovieID: "m1"},
-		StartedAt: fixedNow, FinishedAt: finishedAt, Succeeded: true, ShowtimeCount: 2,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	latest, err := repository.LatestSuccessfulPoll(ctx, domain.ProviderMegabox)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !latest.Equal(finishedAt) {
-		t.Fatalf("latest=%s want=%s", latest, finishedAt)
-	}
-}
-
-func assertDeliveryStatus(t *testing.T, repository *Repository, subscriptionID, showtimeKey string, want DeliveryStatus) {
-	t.Helper()
-	got, err := repository.GetDeliveryStatus(context.Background(), subscriptionID, showtimeKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != want {
-		t.Fatalf("status=%q want=%q", got, want)
+	var version int
+	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
+		t.Fatalf("version=%d err=%v", version, err)
 	}
 }

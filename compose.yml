@@ -1,0 +1,23 @@
+services:
+  lightpanda:
+    image: lightpanda/browser:nightly
+    restart: unless-stopped
+    mem_limit: 128m
+
+  app:
+    build: .
+    depends_on:
+      - lightpanda
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/my-movie.sqlite
+    ports:
+      - "3001:3000"
+    volumes:
+      - my-movie-data:/data
+    restart: unless-stopped
+
+volumes:
+  my-movie-data:
+    external: true
+    name: my-movie-data

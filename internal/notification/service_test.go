@@ -9,198 +9,126 @@ import (
 
 	"my-movie/internal/database"
 	"my-movie/internal/domain"
+	"my-movie/internal/targets"
 )
 
-func TestDeliverPendingGroupsAndSortsShowtimes(t *testing.T) {
-	service, repository, notifier, subscription, closeDatabase := newNotificationTestService(t)
+func TestDeliverPendingGroupsMovieDateAndSendsToTargetChannel(t *testing.T) {
+	service, repository, notifier, closeDatabase := newNotificationTestService(t)
 	defer closeDatabase()
 	showtimes := []domain.Showtime{
-		{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1", ExternalID: "late", PlayDate: "2026-07-20", StartsAt: "18:30", Auditorium: "2관"},
-		{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1", ExternalID: "early", PlayDate: "2026-07-20", StartsAt: "14:00", Auditorium: "1관"},
+		{Provider: domain.ProviderMegabox, TargetID: "megabox-coex-dolby", TheaterID: "1351", TheaterName: "코엑스", MovieID: "m1", MovieName: "호프", ExternalID: "late", PlayDate: "2026-07-20", StartsAt: "18:30", EndsAt: "20:30", Auditorium: "Dolby Cinema", RemainingSeats: 20, TotalSeats: 144, SeatCountKnown: true},
+		{Provider: domain.ProviderMegabox, TargetID: "megabox-coex-dolby", TheaterID: "1351", TheaterName: "코엑스", MovieID: "m1", MovieName: "호프", ExternalID: "early", PlayDate: "2026-07-20", StartsAt: "14:00", EndsAt: "16:00", Auditorium: "Dolby Cinema", RemainingSeats: 57, TotalSeats: 144, SeatCountKnown: true},
 	}
-	if err := repository.RecordScan(context.Background(), showtimes, ""); err != nil {
+	if err := repository.RecordTargetSnapshot(context.Background(), "megabox-coex-dolby", showtimes); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := service.DeliverPending(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(notifier.alerts) != 1 {
-		t.Fatalf("alerts=%d", len(notifier.alerts))
+	if len(notifier.alerts) != 1 || notifier.channels[0] != "dolby-channel" {
+		t.Fatalf("channels=%v alerts=%+v", notifier.channels, notifier.alerts)
 	}
 	alert := notifier.alerts[0]
-	if got := alert.Times; len(got) != 2 || got[0] != "14:00" || got[1] != "18:30" {
-		t.Fatalf("times=%v", got)
+	if alert.MovieName != "호프" || len(alert.Sessions) != 2 || alert.Sessions[0].StartsAt != "14:00" || alert.Sessions[1].StartsAt != "18:30" {
+		t.Fatalf("alert=%+v", alert)
 	}
-	if alert.Links.App != "https://app.example/1372/m1" || alert.Links.Web != "https://web.example/1372/m1" {
+	if alert.Links.App != "https://app.example/1351/m1" || alert.Links.Web != "https://web.example/1351/m1" {
 		t.Fatalf("links=%+v", alert.Links)
 	}
-	assertDelivery(t, repository, subscription.ID, "megabox:early", database.DeliverySent, 1)
-	assertDelivery(t, repository, subscription.ID, "megabox:late", database.DeliverySent, 1)
+	for _, id := range []string{"early", "late"} {
+		delivery, err := repository.GetChannelDelivery(context.Background(), "megabox-coex-dolby", id)
+		if err != nil || delivery.Status != database.DeliverySent || delivery.AttemptCount != 1 {
+			t.Fatalf("delivery %s=%+v err=%v", id, delivery, err)
+		}
+	}
 }
 
 func TestDeliverPendingFailsAfterThreeTransientAttempts(t *testing.T) {
-	service, repository, notifier, subscription, closeDatabase := newNotificationTestService(t)
+	service, repository, notifier, closeDatabase := newNotificationTestService(t)
 	defer closeDatabase()
-	notifier.alertErr = errors.New("temporary discord error")
-	showtime := domain.Showtime{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1", ExternalID: "s1", PlayDate: "2026-07-20", StartsAt: "14:00"}
-	if err := repository.RecordScan(context.Background(), []domain.Showtime{showtime}, ""); err != nil {
+	notifier.err = errors.New("temporary discord error")
+	showtime := domain.Showtime{Provider: domain.ProviderMegabox, TargetID: "megabox-coex-dolby", TheaterID: "1351", TheaterName: "코엑스", MovieID: "m1", MovieName: "호프", ExternalID: "s1", PlayDate: "2026-07-20", StartsAt: "14:00"}
+	if err := repository.RecordTargetSnapshot(context.Background(), "megabox-coex-dolby", []domain.Showtime{showtime}); err != nil {
 		t.Fatal(err)
 	}
-
 	for attempt := 1; attempt <= 3; attempt++ {
 		if err := service.DeliverPending(context.Background()); err == nil {
 			t.Fatalf("attempt %d: expected delivery error", attempt)
 		}
 	}
-	assertDelivery(t, repository, subscription.ID, "megabox:s1", database.DeliveryFailed, 3)
+	delivery, err := repository.GetChannelDelivery(context.Background(), "megabox-coex-dolby", "s1")
+	if err != nil || delivery.Status != database.DeliveryFailed || delivery.AttemptCount != 3 {
+		t.Fatalf("delivery=%+v err=%v", delivery, err)
+	}
 }
 
-func TestDeliverPendingDisablesSubscriptionWhenDMIsUnavailable(t *testing.T) {
-	service, repository, notifier, subscription, closeDatabase := newNotificationTestService(t)
+func TestUnavailableChannelTurnsTargetOff(t *testing.T) {
+	service, repository, notifier, closeDatabase := newNotificationTestService(t)
 	defer closeDatabase()
-	notifier.alertErr = ErrDMUnavailable
-	showtime := domain.Showtime{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1", ExternalID: "s1", PlayDate: "2026-07-20", StartsAt: "14:00"}
-	if err := repository.RecordScan(context.Background(), []domain.Showtime{showtime}, ""); err != nil {
+	notifier.err = ErrChannelUnavailable
+	showtime := domain.Showtime{Provider: domain.ProviderMegabox, TargetID: "megabox-coex-dolby", TheaterID: "1351", TheaterName: "코엑스", MovieID: "m1", MovieName: "호프", ExternalID: "s1", PlayDate: "2026-07-20", StartsAt: "14:00"}
+	if err := repository.RecordTargetSnapshot(context.Background(), "megabox-coex-dolby", []domain.Showtime{showtime}); err != nil {
 		t.Fatal(err)
 	}
-
-	if err := service.DeliverPending(context.Background()); !errors.Is(err, ErrDMUnavailable) {
+	if err := service.DeliverPending(context.Background()); !errors.Is(err, ErrChannelUnavailable) {
 		t.Fatalf("error=%v", err)
 	}
-	got, err := repository.GetSubscription(context.Background(), subscription.ID)
-	if err != nil {
-		t.Fatal(err)
+	if service.disabler.(*recordingDisabler).targetID != "megabox-coex-dolby" {
+		t.Fatalf("disabled target=%q", service.disabler.(*recordingDisabler).targetID)
 	}
-	if got.Status != database.StatusDisabled {
-		t.Fatalf("status=%q", got.Status)
-	}
-	assertDelivery(t, repository, subscription.ID, "megabox:s1", database.DeliveryFailed, 1)
-}
-
-func TestDeliveryStateSurvivesRestartWithoutDuplicateAlert(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "persistent.sqlite")
-	notifier := &recordingNotifier{}
-	providers := map[domain.ProviderID]domain.TheaterProvider{domain.ProviderMegabox: linkProvider{}}
-	ctx := context.Background()
-
-	db, err := database.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository := database.NewRepository(db, time.Now)
-	subscription, err := repository.CreateInitializingSubscription(ctx, database.CreateSubscriptionInput{
-		DiscordUserID: "u1", Provider: domain.ProviderMegabox,
-		Theater: domain.Theater{ID: "1372", Name: "Gangnam", AreaCode: "10"}, Movie: domain.Movie{ID: "m1", Name: "Movie"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	baseline := domain.Showtime{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1", ExternalID: "baseline", PlayDate: "2026-07-20", StartsAt: "10:00"}
-	if err := repository.RecordScan(ctx, []domain.Showtime{baseline}, subscription.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := repository.ActivateSubscription(ctx, subscription.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	db, err = database.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository = database.NewRepository(db, time.Now)
-	newShowtime := domain.Showtime{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1", ExternalID: "new", PlayDate: "2026-07-20", StartsAt: "14:00"}
-	if err := repository.RecordScan(ctx, []domain.Showtime{baseline, newShowtime}, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := NewService(repository, notifier, providers).DeliverPending(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if len(notifier.alerts) != 1 || len(notifier.alerts[0].Times) != 1 || notifier.alerts[0].Times[0] != "14:00" {
-		t.Fatalf("alerts=%+v", notifier.alerts)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	db, err = database.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	repository = database.NewRepository(db, time.Now)
-	if err := repository.RecordScan(ctx, []domain.Showtime{baseline, newShowtime}, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := NewService(repository, notifier, providers).DeliverPending(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if len(notifier.alerts) != 1 {
-		t.Fatalf("duplicate alerts=%d", len(notifier.alerts))
+	states, err := repository.ListTargetStates(context.Background())
+	if err != nil || len(states) != 1 || states[0].Enabled {
+		t.Fatalf("states=%+v err=%v", states, err)
 	}
 }
 
 type recordingNotifier struct {
+	channels []string
 	alerts   []Alert
-	alertErr error
+	err      error
 }
 
-func (n *recordingNotifier) SendRegistrationConfirmation(context.Context, string, database.Subscription) error {
-	return nil
+type recordingDisabler struct {
+	repository *database.Repository
+	targetID   string
 }
-func (n *recordingNotifier) SendAlert(_ context.Context, _ string, alert Alert) error {
+
+func (d *recordingDisabler) DisableUnavailable(ctx context.Context, targetID string) error {
+	d.targetID = targetID
+	return d.repository.DisableTarget(ctx, targetID)
+}
+
+func (n *recordingNotifier) SendAlert(_ context.Context, channelID string, alert Alert) error {
+	n.channels = append(n.channels, channelID)
 	n.alerts = append(n.alerts, alert)
-	return n.alertErr
+	return n.err
 }
 
 type linkProvider struct{}
 
-func (linkProvider) ID() domain.ProviderID                                        { return domain.ProviderMegabox }
-func (linkProvider) SearchMovies(context.Context, string) ([]domain.Movie, error) { return nil, nil }
-func (linkProvider) SearchTheaters(context.Context, string) ([]domain.Theater, error) {
-	return nil, nil
-}
-func (linkProvider) FetchShowtimes(context.Context, string, string) ([]domain.Showtime, error) {
-	return nil, nil
-}
-func (linkProvider) BuildBookingLinks(theaterID, movieID string) domain.BookingLinks {
-	return domain.BookingLinks{App: "https://app.example/" + theaterID + "/" + movieID, Web: "https://web.example/" + theaterID + "/" + movieID}
+func (linkProvider) BuildBookingLinks(target domain.AlertTarget, movieID string) domain.BookingLinks {
+	return domain.BookingLinks{App: "https://app.example/" + target.Theater.ID + "/" + movieID, Web: "https://web.example/" + target.Theater.ID + "/" + movieID}
 }
 
-func newNotificationTestService(t *testing.T) (*Service, *database.Repository, *recordingNotifier, database.Subscription, func()) {
+func newNotificationTestService(t *testing.T) (*Service, *database.Repository, *recordingNotifier, func()) {
 	t.Helper()
 	db, err := database.Open(filepath.Join(t.TempDir(), "test.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository := database.NewRepository(db, time.Now)
-	subscription, err := repository.CreateInitializingSubscription(context.Background(), database.CreateSubscriptionInput{
-		DiscordUserID: "u1", Provider: domain.ProviderMegabox,
-		Theater: domain.Theater{ID: "1372", Name: "강남", AreaCode: "10"},
-		Movie:   domain.Movie{ID: "m1", Name: "영화"},
-	})
-	if err != nil {
+	repository := database.NewRepository(db, func() time.Time { return time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC) })
+	if err := repository.SaveTargetState(context.Background(), database.TargetState{TargetID: "megabox-coex-dolby", ChannelID: "dolby-channel", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.ActivateSubscription(context.Background(), subscription.ID); err != nil {
-		t.Fatal(err)
-	}
-	subscription.Status = database.StatusActive
 	notifier := &recordingNotifier{}
-	providers := map[domain.ProviderID]domain.TheaterProvider{domain.ProviderMegabox: linkProvider{}}
-	return NewService(repository, notifier, providers), repository, notifier, subscription, func() { _ = db.Close() }
+	providers := map[domain.ProviderID]LinkProvider{domain.ProviderMegabox: linkProvider{}}
+	disabler := &recordingDisabler{repository: repository}
+	return NewService(repository, notifier, providers, disabler), repository, notifier, func() { _ = db.Close() }
 }
 
-func assertDelivery(t *testing.T, repository *database.Repository, subscriptionID, key string, status database.DeliveryStatus, attempts int) {
-	t.Helper()
-	delivery, err := repository.GetDelivery(context.Background(), subscriptionID, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if delivery.Status != status || delivery.AttemptCount != attempts {
-		t.Fatalf("delivery=%+v want status=%q attempts=%d", delivery, status, attempts)
+func TestTargetCatalogUsedByNotificationStillContainsCoex(t *testing.T) {
+	if _, ok := targets.Find("megabox-coex-dolby"); !ok {
+		t.Fatal("missing coex target")
 	}
 }

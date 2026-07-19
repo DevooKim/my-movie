@@ -6,15 +6,15 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
-	"my-movie/internal/database"
+	"my-movie/internal/domain"
 	"my-movie/internal/notification"
 )
 
 type MessageSession interface {
-	UserChannelCreate(string, ...discordgo.RequestOption) (*discordgo.Channel, error)
 	ChannelMessageSendComplex(string, *discordgo.MessageSend, ...discordgo.RequestOption) (*discordgo.Message, error)
 }
 
@@ -22,49 +22,56 @@ type Notifier struct{ session MessageSession }
 
 func NewNotifier(session MessageSession) *Notifier { return &Notifier{session: session} }
 
-func (n *Notifier) SendRegistrationConfirmation(ctx context.Context, userID string, item database.Subscription) error {
-	message := &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{{
-		Title:       "오픈 알림 등록 완료",
-		Description: fmt.Sprintf("%s · %s\n%s", providerName(item.Provider), item.Theater.Name, item.Movie.Name),
-		Color:       0x2ecc71,
-	}}}
-	return n.send(ctx, userID, message)
-}
-
-func (n *Notifier) SendAlert(ctx context.Context, userID string, alert notification.Alert) error {
+func (n *Notifier) SendAlert(ctx context.Context, channelID string, alert notification.Alert) error {
 	if err := requireHTTPS(alert.Links.App, alert.Links.Web); err != nil {
 		return err
 	}
-	lines := make([]string, 0, len(alert.Times))
-	for index, start := range alert.Times {
-		line := start
-		if index < len(alert.Auditoriums) && alert.Auditoriums[index] != "" {
-			line += " · " + alert.Auditoriums[index]
+	message := alertMessage(alert)
+	_, err := n.session.ChannelMessageSendComplex(channelID, message, discordgo.WithContext(ctx))
+	return classifyDiscordError(err)
+}
+
+func alertMessage(alert notification.Alert) *discordgo.MessageSend {
+	var content strings.Builder
+	content.WriteString("🎬 새 예매 회차 오픈\n\n")
+	fmt.Fprintf(&content, "**%s**\n", alert.MovieName)
+	fmt.Fprintf(&content, "📅 **%s**\n", koreanDate(alert.PlayDate))
+	for _, session := range alert.Sessions {
+		timeRange := session.StartsAt
+		if session.EndsAt != "" {
+			timeRange += " – " + session.EndsAt
 		}
-		lines = append(lines, line)
+		fmt.Fprintf(&content, "⏰ **%s**\n", timeRange)
+		if session.SeatCountKnown {
+			fmt.Fprintf(&content, "💺 잔여 %d / %d석\n", session.RemainingSeats, session.TotalSeats)
+		}
 	}
-	message := &discordgo.MessageSend{
-		Embeds: []*discordgo.MessageEmbed{{
-			Title:       "새 예매 회차가 열렸어요",
-			Description: fmt.Sprintf("**%s**\n%s · %s\n\n%s", alert.Movie.Name, providerName(alert.Provider), alert.Theater.Name, strings.Join(lines, "\n")),
-			Color:       0xe74c3c,
-			Fields:      []*discordgo.MessageEmbedField{{Name: "상영일", Value: alert.PlayDate}},
-		}},
+	fmt.Fprintf(&content, "\n%s %s · %s", providerDisplayName(alert.Provider), alert.TheaterName, alert.AuditoriumName)
+	return &discordgo.MessageSend{
+		Content: content.String(),
 		Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 			discordgo.Button{Label: "앱에서 예매", Style: discordgo.LinkButton, URL: alert.Links.App},
 			discordgo.Button{Label: "웹에서 예매", Style: discordgo.LinkButton, URL: alert.Links.Web},
 		}}},
 	}
-	return n.send(ctx, userID, message)
 }
 
-func (n *Notifier) send(ctx context.Context, userID string, message *discordgo.MessageSend) error {
-	channel, err := n.session.UserChannelCreate(userID, discordgo.WithContext(ctx))
+func koreanDate(raw string) string {
+	date, err := time.Parse("2006-01-02", raw)
 	if err != nil {
-		return classifyDiscordError(err)
+		return raw
 	}
-	_, err = n.session.ChannelMessageSendComplex(channel.ID, message, discordgo.WithContext(ctx))
-	return classifyDiscordError(err)
+	return fmt.Sprintf("%d년 %d월 %d일", date.Year(), date.Month(), date.Day())
+}
+
+func providerDisplayName(provider domain.ProviderID) string {
+	if provider == domain.ProviderMegabox {
+		return "메가박스"
+	}
+	if provider == domain.ProviderCGV {
+		return "CGV"
+	}
+	return string(provider)
 }
 
 func classifyDiscordError(err error) error {
@@ -72,8 +79,11 @@ func classifyDiscordError(err error) error {
 		return nil
 	}
 	var restError *discordgo.RESTError
-	if errors.As(err, &restError) && restError.Message != nil && restError.Message.Code == 50007 {
-		return fmt.Errorf("%w: %v", notification.ErrDMUnavailable, err)
+	if errors.As(err, &restError) && restError.Message != nil {
+		switch restError.Message.Code {
+		case 10003, 50001, 50013:
+			return fmt.Errorf("%w: %v", notification.ErrChannelUnavailable, err)
+		}
 	}
 	return err
 }

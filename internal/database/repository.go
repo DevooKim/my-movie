@@ -9,58 +9,22 @@ import (
 	"time"
 
 	"my-movie/internal/domain"
-)
-
-type SubscriptionStatus string
-
-const (
-	StatusInitializing SubscriptionStatus = "initializing"
-	StatusActive       SubscriptionStatus = "active"
-	StatusDisabled     SubscriptionStatus = "disabled"
+	"my-movie/internal/targets"
 )
 
 type DeliveryStatus string
 
 const (
-	DeliveryBaseline DeliveryStatus = "baseline"
-	DeliveryPending  DeliveryStatus = "pending"
-	DeliverySent     DeliveryStatus = "sent"
-	DeliveryFailed   DeliveryStatus = "failed"
+	DeliveryPending DeliveryStatus = "pending"
+	DeliverySent    DeliveryStatus = "sent"
+	DeliveryFailed  DeliveryStatus = "failed"
 )
 
-type Subscription struct {
-	ID             string
-	DiscordUserID  string
-	Provider       domain.ProviderID
-	TargetID       string
-	AuditoriumName string
-	Theater        domain.Theater
-	Movie          domain.Movie
-	Status         SubscriptionStatus
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-}
-
-type Delivery struct {
-	SubscriptionID string
-	ShowtimeKey    string
-	Status         DeliveryStatus
-	AttemptCount   int
-}
-
-type PendingDelivery struct {
-	Subscription Subscription
-	ShowtimeKey  string
-	PlayDate     string
-	StartsAt     string
-	Auditorium   string
-	AttemptCount int
-}
-
 type PollingGroup struct {
-	Provider domain.ProviderID
-	TargetID string
-	MovieID  string
+	Provider  domain.ProviderID
+	TargetID  string
+	TheaterID string
+	MovieID   string
 }
 
 type PollRun struct {
@@ -72,13 +36,34 @@ type PollRun struct {
 	ErrorSummary  string
 }
 
-type CreateSubscriptionInput struct {
-	DiscordUserID  string
-	Provider       domain.ProviderID
-	TargetID       string
-	AuditoriumName string
-	Theater        domain.Theater
-	Movie          domain.Movie
+type Installation struct {
+	GuildID          string
+	OwnerUserID      string
+	CategoryID       string
+	ControlChannelID string
+	ControlMessageID string
+}
+
+type TargetState struct {
+	TargetID   string
+	ChannelID  string
+	Enabled    bool
+	UpdatedAt  time.Time
+	Generation int64
+}
+
+type PendingChannelDelivery struct {
+	TargetID     string
+	ChannelID    string
+	Showtime     domain.Showtime
+	AttemptCount int
+}
+
+type ChannelDelivery struct {
+	TargetID     string
+	ShowtimeID   string
+	Status       DeliveryStatus
+	AttemptCount int
 }
 
 type Repository struct {
@@ -90,109 +75,307 @@ func NewRepository(database *sql.DB, now func() time.Time) *Repository {
 	return &Repository{database: database, now: now}
 }
 
-func (r *Repository) CreateInitializingSubscription(ctx context.Context, input CreateSubscriptionInput) (Subscription, error) {
-	now := r.now().UTC()
-	subscription := Subscription{
-		ID: newID(), DiscordUserID: input.DiscordUserID, Provider: input.Provider,
-		TargetID: input.TargetID, AuditoriumName: input.AuditoriumName,
-		Theater: input.Theater, Movie: input.Movie, Status: StatusInitializing,
-		CreatedAt: now, UpdatedAt: now,
-	}
+func (r *Repository) SaveInstallation(ctx context.Context, installation Installation) error {
 	_, err := r.database.ExecContext(ctx, `
-		INSERT INTO subscriptions(
-			id, discord_user_id, provider, target_id, auditorium_name,
-			theater_id, theater_name, theater_area_code, movie_id, movie_name,
-			status, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		subscription.ID, subscription.DiscordUserID, subscription.Provider,
-		subscription.TargetID, subscription.AuditoriumName,
-		subscription.Theater.ID, subscription.Theater.Name, subscription.Theater.AreaCode,
-		subscription.Movie.ID, subscription.Movie.Name, subscription.Status,
-		formatTime(now), formatTime(now),
+		INSERT INTO installations(guild_id, owner_user_id, category_id, control_channel_id, control_message_id, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?)
+		ON CONFLICT(guild_id) DO UPDATE SET
+		  owner_user_id=excluded.owner_user_id,
+		  category_id=excluded.category_id,
+		  control_channel_id=excluded.control_channel_id,
+		  control_message_id=excluded.control_message_id,
+		  updated_at=excluded.updated_at`,
+		installation.GuildID, installation.OwnerUserID, installation.CategoryID,
+		installation.ControlChannelID, installation.ControlMessageID, formatTime(r.now()),
 	)
-	if err != nil {
-		return Subscription{}, err
-	}
-	return subscription, nil
-}
-
-func (r *Repository) ActivateSubscription(ctx context.Context, id string) error {
-	result, err := r.database.ExecContext(ctx,
-		"UPDATE subscriptions SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
-		StatusActive, formatTime(r.now()), id, StatusInitializing,
-	)
-	if err != nil {
-		return err
-	}
-	return requireChanged(result, "activate subscription")
-}
-
-func (r *Repository) DeleteSubscription(ctx context.Context, id string) error {
-	_, err := r.database.ExecContext(ctx, "DELETE FROM subscriptions WHERE id = ?", id)
 	return err
 }
 
-func (r *Repository) DeleteAllSubscriptionsByUser(ctx context.Context, userID string) (int64, error) {
-	result, err := r.database.ExecContext(ctx, "DELETE FROM subscriptions WHERE discord_user_id = ?", userID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+func (r *Repository) GetInstallation(ctx context.Context) (Installation, error) {
+	var installation Installation
+	err := r.database.QueryRowContext(ctx, `
+		SELECT guild_id, owner_user_id, category_id, control_channel_id, control_message_id
+		FROM installations ORDER BY updated_at DESC LIMIT 1`).Scan(
+		&installation.GuildID, &installation.OwnerUserID, &installation.CategoryID,
+		&installation.ControlChannelID, &installation.ControlMessageID,
+	)
+	return installation, err
 }
 
-func (r *Repository) ListSubscriptionsByUser(ctx context.Context, userID string) ([]Subscription, error) {
-	rows, err := r.database.QueryContext(ctx, subscriptionSelect+" WHERE discord_user_id = ? ORDER BY created_at", userID)
+func (r *Repository) SaveTargetState(ctx context.Context, state TargetState) error {
+	_, err := r.database.ExecContext(ctx, `
+		INSERT INTO target_states(target_id, channel_id, enabled, updated_at, generation)
+		VALUES(?, ?, ?, ?, 1)
+		ON CONFLICT(target_id) DO UPDATE SET
+		  channel_id=excluded.channel_id,
+		  enabled=excluded.enabled,
+		  updated_at=excluded.updated_at,
+		  generation=target_states.generation + 1`,
+		state.TargetID, state.ChannelID, state.Enabled, formatTime(r.now()),
+	)
+	return err
+}
+
+func (r *Repository) ListTargetStates(ctx context.Context) ([]TargetState, error) {
+	rows, err := r.database.QueryContext(ctx, `
+		SELECT target_id, channel_id, enabled, updated_at, generation
+		FROM target_states ORDER BY target_id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var subscriptions []Subscription
+	var states []TargetState
 	for rows.Next() {
-		subscription, err := scanSubscription(rows)
+		var state TargetState
+		var updatedAt string
+		if err := rows.Scan(&state.TargetID, &state.ChannelID, &state.Enabled, &updatedAt, &state.Generation); err != nil {
+			return nil, err
+		}
+		state.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
 		if err != nil {
 			return nil, err
 		}
-		subscriptions = append(subscriptions, subscription)
+		states = append(states, state)
 	}
-	return subscriptions, rows.Err()
+	return states, rows.Err()
 }
 
-func (r *Repository) ListActivePollingGroups(ctx context.Context) ([]PollingGroup, error) {
+func (r *Repository) ReplaceBaseline(ctx context.Context, targetID string, showtimeIDs []string) error {
+	transaction, err := r.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	if _, err := transaction.ExecContext(ctx, `
+		DELETE FROM channel_deliveries WHERE target_id = ? AND status = ?`, targetID, DeliveryPending); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM target_baselines WHERE target_id = ?`, targetID); err != nil {
+		return err
+	}
+	for _, showtimeID := range showtimeIDs {
+		if _, err := transaction.ExecContext(ctx, `
+			INSERT INTO target_baselines(target_id, showtime_id, first_seen_at)
+			VALUES(?, ?, ?)`, targetID, showtimeID, formatTime(r.now())); err != nil {
+			return err
+		}
+	}
+	return transaction.Commit()
+}
+
+func (r *Repository) RecordTargetSnapshot(ctx context.Context, targetID string, showtimes []domain.Showtime) error {
+	return r.recordTargetSnapshot(ctx, TargetState{TargetID: targetID}, showtimes, false)
+}
+
+func (r *Repository) RecordTargetSnapshotForState(ctx context.Context, state TargetState, showtimes []domain.Showtime) error {
+	return r.recordTargetSnapshot(ctx, state, showtimes, true)
+}
+
+func (r *Repository) recordTargetSnapshot(ctx context.Context, state TargetState, showtimes []domain.Showtime, guarded bool) error {
+	transaction, err := r.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	if guarded {
+		var current bool
+		if err := transaction.QueryRowContext(ctx, `
+			SELECT EXISTS(
+			  SELECT 1 FROM target_states
+			  WHERE target_id = ? AND enabled = 1 AND generation = ?
+			)`, state.TargetID, state.Generation).Scan(&current); err != nil {
+			return err
+		}
+		if !current {
+			return nil
+		}
+	}
+	targetID := state.TargetID
+	now := formatTime(r.now())
+	for _, showtime := range showtimes {
+		var exists bool
+		if err := transaction.QueryRowContext(ctx, `
+			SELECT EXISTS(SELECT 1 FROM target_baselines WHERE target_id = ? AND showtime_id = ?)`,
+			targetID, showtime.ExternalID,
+		).Scan(&exists); err != nil {
+			return err
+		}
+		if _, err := transaction.ExecContext(ctx, `
+			INSERT INTO target_showtimes(
+			  target_id, showtime_id, provider, theater_id, theater_name,
+			  movie_id, movie_name, movie_english_name, play_date, starts_at, ends_at,
+			  auditorium, format, rating, remaining_seats, total_seats,
+			  seat_count_known, poster_url, first_seen_at, last_seen_at
+			) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(target_id, showtime_id) DO UPDATE SET
+			  remaining_seats=excluded.remaining_seats,
+			  total_seats=excluded.total_seats,
+			  seat_count_known=excluded.seat_count_known,
+			  last_seen_at=excluded.last_seen_at`,
+			targetID, showtime.ExternalID, showtime.Provider, showtime.TheaterID, showtime.TheaterName,
+			showtime.MovieID, showtime.MovieName, showtime.MovieEnglishName, showtime.PlayDate,
+			showtime.StartsAt, showtime.EndsAt, showtime.Auditorium, showtime.Format,
+			showtime.Rating, showtime.RemainingSeats, showtime.TotalSeats, showtime.SeatCountKnown,
+			showtime.PosterURL, now, now,
+		); err != nil {
+			return err
+		}
+		if !exists {
+			if _, err := transaction.ExecContext(ctx, `
+				INSERT OR IGNORE INTO channel_deliveries(target_id, showtime_id, status)
+				VALUES(?, ?, ?)`, targetID, showtime.ExternalID, DeliveryPending); err != nil {
+				return err
+			}
+		}
+		if _, err := transaction.ExecContext(ctx, `
+			INSERT OR IGNORE INTO target_baselines(target_id, showtime_id, first_seen_at)
+			VALUES(?, ?, ?)`, targetID, showtime.ExternalID, now); err != nil {
+			return err
+		}
+	}
+	return transaction.Commit()
+}
+
+func (r *Repository) ListPendingChannelDeliveries(ctx context.Context) ([]PendingChannelDelivery, error) {
 	rows, err := r.database.QueryContext(ctx, `
-		SELECT DISTINCT provider, target_id, movie_id
-		FROM subscriptions WHERE status = ?
-		ORDER BY provider, target_id, movie_id`, StatusActive)
+		SELECT d.target_id, ts.channel_id, d.attempt_count,
+		       st.provider, st.theater_id, st.theater_name, st.movie_id, st.movie_name,
+		       st.movie_english_name, st.showtime_id, st.play_date, st.starts_at, st.ends_at,
+		       st.auditorium, st.format, st.rating, st.remaining_seats, st.total_seats,
+		       st.seat_count_known, st.poster_url
+		FROM channel_deliveries d
+		JOIN target_states ts ON ts.target_id = d.target_id
+		JOIN target_showtimes st ON st.target_id = d.target_id AND st.showtime_id = d.showtime_id
+		WHERE d.status = ? AND ts.enabled = 1
+		ORDER BY d.target_id, st.play_date, st.starts_at, st.showtime_id`, DeliveryPending)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var groups []PollingGroup
+	var deliveries []PendingChannelDelivery
 	for rows.Next() {
-		var group PollingGroup
-		if err := rows.Scan(&group.Provider, &group.TargetID, &group.MovieID); err != nil {
+		var delivery PendingChannelDelivery
+		delivery.Showtime.TargetID = ""
+		if err := rows.Scan(
+			&delivery.TargetID, &delivery.ChannelID, &delivery.AttemptCount,
+			&delivery.Showtime.Provider, &delivery.Showtime.TheaterID, &delivery.Showtime.TheaterName,
+			&delivery.Showtime.MovieID, &delivery.Showtime.MovieName, &delivery.Showtime.MovieEnglishName,
+			&delivery.Showtime.ExternalID, &delivery.Showtime.PlayDate, &delivery.Showtime.StartsAt,
+			&delivery.Showtime.EndsAt, &delivery.Showtime.Auditorium, &delivery.Showtime.Format,
+			&delivery.Showtime.Rating, &delivery.Showtime.RemainingSeats, &delivery.Showtime.TotalSeats,
+			&delivery.Showtime.SeatCountKnown, &delivery.Showtime.PosterURL,
+		); err != nil {
 			return nil, err
 		}
-		groups = append(groups, group)
+		delivery.Showtime.TargetID = delivery.TargetID
+		deliveries = append(deliveries, delivery)
 	}
-	return groups, rows.Err()
+	return deliveries, rows.Err()
+}
+
+func (r *Repository) MarkChannelSent(ctx context.Context, targetID string, showtimeIDs []string) error {
+	return r.updateChannelDeliveries(ctx, targetID, showtimeIDs, "", false, true)
+}
+
+func (r *Repository) MarkChannelFailedAttempt(ctx context.Context, targetID string, showtimeIDs []string, message string, permanent bool) error {
+	return r.updateChannelDeliveries(ctx, targetID, showtimeIDs, message, permanent, false)
+}
+
+func (r *Repository) updateChannelDeliveries(ctx context.Context, targetID string, showtimeIDs []string, message string, permanent, sent bool) error {
+	transaction, err := r.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	for _, showtimeID := range showtimeIDs {
+		status := DeliveryPending
+		if sent {
+			status = DeliverySent
+		} else if permanent {
+			status = DeliveryFailed
+		} else {
+			var attempts int
+			if err := transaction.QueryRowContext(ctx, `
+				SELECT attempt_count FROM channel_deliveries
+				WHERE target_id = ? AND showtime_id = ? AND status = ?`,
+				targetID, showtimeID, DeliveryPending,
+			).Scan(&attempts); err != nil {
+				return err
+			}
+			if attempts+1 >= 3 {
+				status = DeliveryFailed
+			}
+		}
+		result, err := transaction.ExecContext(ctx, `
+			UPDATE channel_deliveries
+			SET status = ?, attempt_count = attempt_count + 1,
+			    last_attempt_at = ?, last_error = ?
+			WHERE target_id = ? AND showtime_id = ? AND status = ?`,
+			status, formatTime(r.now()), nullableError(message), targetID, showtimeID, DeliveryPending,
+		)
+		if err != nil {
+			return err
+		}
+		if err := requireChanged(result, "update channel delivery"); err != nil {
+			return err
+		}
+	}
+	return transaction.Commit()
+}
+
+func (r *Repository) GetChannelDelivery(ctx context.Context, targetID, showtimeID string) (ChannelDelivery, error) {
+	var delivery ChannelDelivery
+	err := r.database.QueryRowContext(ctx, `
+		SELECT target_id, showtime_id, status, attempt_count
+		FROM channel_deliveries WHERE target_id = ? AND showtime_id = ?`, targetID, showtimeID,
+	).Scan(&delivery.TargetID, &delivery.ShowtimeID, &delivery.Status, &delivery.AttemptCount)
+	return delivery, err
+}
+
+func (r *Repository) DisableTarget(ctx context.Context, targetID string) error {
+	result, err := r.database.ExecContext(ctx, `
+		UPDATE target_states SET enabled = 0, updated_at = ? WHERE target_id = ?`, formatTime(r.now()), targetID)
+	if err != nil {
+		return err
+	}
+	return requireChanged(result, "disable target")
+}
+
+func (r *Repository) IsTargetEnabled(ctx context.Context, targetID string) (bool, error) {
+	var enabled bool
+	err := r.database.QueryRowContext(ctx, `SELECT enabled FROM target_states WHERE target_id = ?`, targetID).Scan(&enabled)
+	return enabled, err
+}
+
+func nullableError(message string) any {
+	if message == "" {
+		return nil
+	}
+	return message
 }
 
 func (r *Repository) ListActiveProviderIDs(ctx context.Context) ([]domain.ProviderID, error) {
-	rows, err := r.database.QueryContext(ctx, `
-		SELECT DISTINCT provider FROM subscriptions WHERE status = ? ORDER BY provider`, StatusActive)
+	states, err := r.ListTargetStates(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var providers []domain.ProviderID
-	for rows.Next() {
-		var provider domain.ProviderID
-		if err := rows.Scan(&provider); err != nil {
-			return nil, err
+	seen := make(map[domain.ProviderID]bool)
+	for _, state := range states {
+		if !state.Enabled {
+			continue
 		}
-		providers = append(providers, provider)
+		target, ok := targets.Find(state.TargetID)
+		if ok {
+			seen[target.Provider] = true
+		}
 	}
-	return providers, rows.Err()
+	providers := make([]domain.ProviderID, 0, len(seen))
+	for _, provider := range []domain.ProviderID{domain.ProviderCGV, domain.ProviderMegabox} {
+		if seen[provider] {
+			providers = append(providers, provider)
+		}
+	}
+	return providers, nil
 }
 
 func (r *Repository) PingContext(ctx context.Context) error { return r.database.PingContext(ctx) }
@@ -215,236 +398,11 @@ func (r *Repository) RecordPollRun(ctx context.Context, run PollRun) error {
 			id, provider, theater_id, movie_id, started_at, finished_at,
 			succeeded, showtime_count, error_summary, target_id
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		newID(), run.Group.Provider, "", run.Group.MovieID,
+		newID(), run.Group.Provider, run.Group.TheaterID, run.Group.MovieID,
 		formatTime(run.StartedAt), formatTime(run.FinishedAt), run.Succeeded,
 		run.ShowtimeCount, run.ErrorSummary, run.Group.TargetID,
 	)
 	return err
-}
-
-func (r *Repository) GetSubscription(ctx context.Context, id string) (Subscription, error) {
-	return scanSubscription(r.database.QueryRowContext(ctx, subscriptionSelect+" WHERE id = ?", id))
-}
-
-func (r *Repository) DisableSubscription(ctx context.Context, id string) error {
-	result, err := r.database.ExecContext(ctx,
-		"UPDATE subscriptions SET status = ?, updated_at = ? WHERE id = ?",
-		StatusDisabled, formatTime(r.now()), id,
-	)
-	if err != nil {
-		return err
-	}
-	return requireChanged(result, "disable subscription")
-}
-
-func (r *Repository) RecordScan(ctx context.Context, showtimes []domain.Showtime, baselineSubscriptionID string) error {
-	transaction, err := r.database.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer transaction.Rollback()
-
-	for _, showtime := range showtimes {
-		key := domain.ShowtimeKey(showtime)
-		now := formatTime(r.now())
-		if _, err := transaction.ExecContext(ctx, `
-			INSERT INTO showtimes(key, provider, theater_id, movie_id, external_id, play_date, starts_at, auditorium, first_seen_at, last_seen_at, target_id)
-			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(key) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
-			key, showtime.Provider, showtime.TheaterID, showtime.MovieID, showtime.ExternalID,
-			showtime.PlayDate, showtime.StartsAt, showtime.Auditorium, now, now, showtime.TargetID,
-		); err != nil {
-			return err
-		}
-
-		subscriptions, err := matchingSubscriptions(ctx, transaction, showtime, baselineSubscriptionID)
-		if err != nil {
-			return err
-		}
-		for _, subscription := range subscriptions {
-			status := DeliveryPending
-			if subscription.id == baselineSubscriptionID {
-				status = DeliveryBaseline
-			}
-			if _, err := transaction.ExecContext(ctx, `
-				INSERT OR IGNORE INTO notification_deliveries(subscription_id, showtime_key, status)
-				VALUES(?, ?, ?)`, subscription.id, key, status); err != nil {
-				return err
-			}
-		}
-	}
-	return transaction.Commit()
-}
-
-func (r *Repository) MarkSent(ctx context.Context, subscriptionID string, showtimeKeys []string) error {
-	transaction, err := r.database.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer transaction.Rollback()
-	for _, key := range showtimeKeys {
-		result, err := transaction.ExecContext(ctx, `
-			UPDATE notification_deliveries
-			SET status = ?, attempt_count = attempt_count + 1, last_attempt_at = ?, last_error = NULL
-			WHERE subscription_id = ? AND showtime_key = ? AND status = ?`,
-			DeliverySent, formatTime(r.now()), subscriptionID, key, DeliveryPending,
-		)
-		if err != nil {
-			return err
-		}
-		if err := requireChanged(result, "mark delivery sent"); err != nil {
-			return err
-		}
-	}
-	return transaction.Commit()
-}
-
-func (r *Repository) MarkFailedAttempt(ctx context.Context, subscriptionID string, showtimeKeys []string, message string, permanent bool) error {
-	transaction, err := r.database.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer transaction.Rollback()
-	for _, key := range showtimeKeys {
-		failed := permanent
-		if !failed {
-			var attempts int
-			if err := transaction.QueryRowContext(ctx, `
-				SELECT attempt_count FROM notification_deliveries
-				WHERE subscription_id = ? AND showtime_key = ? AND status = ?`,
-				subscriptionID, key, DeliveryPending,
-			).Scan(&attempts); err != nil {
-				return err
-			}
-			failed = attempts+1 >= 3
-		}
-		status := DeliveryPending
-		if failed {
-			status = DeliveryFailed
-		}
-		if _, err := transaction.ExecContext(ctx, `
-			UPDATE notification_deliveries
-			SET status = ?, attempt_count = attempt_count + 1, last_attempt_at = ?, last_error = ?
-			WHERE subscription_id = ? AND showtime_key = ? AND status = ?`,
-			status, formatTime(r.now()), message, subscriptionID, key, DeliveryPending,
-		); err != nil {
-			return err
-		}
-	}
-	return transaction.Commit()
-}
-
-func (r *Repository) ListPendingDeliveries(ctx context.Context) ([]PendingDelivery, error) {
-	rows, err := r.database.QueryContext(ctx, `
-		SELECT s.id, s.discord_user_id, s.provider, s.target_id, s.auditorium_name,
-		       s.theater_id, s.theater_name, s.theater_area_code,
-		       s.movie_id, s.movie_name, s.status, s.created_at, s.updated_at,
-		       d.showtime_key, st.play_date, st.starts_at, st.auditorium, d.attempt_count
-		FROM notification_deliveries d
-		JOIN subscriptions s ON s.id = d.subscription_id
-		JOIN showtimes st ON st.key = d.showtime_key
-		WHERE d.status = ? AND s.status = ?
-		ORDER BY s.id, st.play_date, st.starts_at, d.showtime_key`, DeliveryPending, StatusActive)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var deliveries []PendingDelivery
-	for rows.Next() {
-		var delivery PendingDelivery
-		var createdAt, updatedAt string
-		if err := rows.Scan(
-			&delivery.Subscription.ID, &delivery.Subscription.DiscordUserID, &delivery.Subscription.Provider,
-			&delivery.Subscription.TargetID, &delivery.Subscription.AuditoriumName,
-			&delivery.Subscription.Theater.ID, &delivery.Subscription.Theater.Name, &delivery.Subscription.Theater.AreaCode,
-			&delivery.Subscription.Movie.ID, &delivery.Subscription.Movie.Name, &delivery.Subscription.Status,
-			&createdAt, &updatedAt, &delivery.ShowtimeKey, &delivery.PlayDate, &delivery.StartsAt,
-			&delivery.Auditorium, &delivery.AttemptCount,
-		); err != nil {
-			return nil, err
-		}
-		delivery.Subscription.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
-		if err != nil {
-			return nil, err
-		}
-		delivery.Subscription.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
-		if err != nil {
-			return nil, err
-		}
-		deliveries = append(deliveries, delivery)
-	}
-	return deliveries, rows.Err()
-}
-
-func (r *Repository) GetDelivery(ctx context.Context, subscriptionID, showtimeKey string) (Delivery, error) {
-	var delivery Delivery
-	err := r.database.QueryRowContext(ctx, `
-		SELECT subscription_id, showtime_key, status, attempt_count
-		FROM notification_deliveries WHERE subscription_id = ? AND showtime_key = ?`,
-		subscriptionID, showtimeKey,
-	).Scan(&delivery.SubscriptionID, &delivery.ShowtimeKey, &delivery.Status, &delivery.AttemptCount)
-	return delivery, err
-}
-
-func (r *Repository) GetDeliveryStatus(ctx context.Context, subscriptionID, showtimeKey string) (DeliveryStatus, error) {
-	var status DeliveryStatus
-	err := r.database.QueryRowContext(ctx,
-		"SELECT status FROM notification_deliveries WHERE subscription_id = ? AND showtime_key = ?",
-		subscriptionID, showtimeKey,
-	).Scan(&status)
-	return status, err
-}
-
-type subscriptionMatch struct{ id string }
-
-func matchingSubscriptions(ctx context.Context, transaction *sql.Tx, showtime domain.Showtime, baselineID string) ([]subscriptionMatch, error) {
-	rows, err := transaction.QueryContext(ctx, `
-		SELECT id FROM subscriptions
-		WHERE provider = ? AND target_id = ? AND movie_id = ?
-		AND (status = ? OR id = ?)`,
-		showtime.Provider, showtime.TargetID, showtime.MovieID, StatusActive, baselineID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var matches []subscriptionMatch
-	for rows.Next() {
-		var match subscriptionMatch
-		if err := rows.Scan(&match.id); err != nil {
-			return nil, err
-		}
-		matches = append(matches, match)
-	}
-	return matches, rows.Err()
-}
-
-const subscriptionSelect = `
-	SELECT id, discord_user_id, provider, target_id, auditorium_name,
-	       theater_id, theater_name, theater_area_code,
-	       movie_id, movie_name, status, created_at, updated_at
-	FROM subscriptions`
-
-type scanner interface{ Scan(...any) error }
-
-func scanSubscription(row scanner) (Subscription, error) {
-	var subscription Subscription
-	var createdAt, updatedAt string
-	err := row.Scan(
-		&subscription.ID, &subscription.DiscordUserID, &subscription.Provider,
-		&subscription.TargetID, &subscription.AuditoriumName,
-		&subscription.Theater.ID, &subscription.Theater.Name, &subscription.Theater.AreaCode,
-		&subscription.Movie.ID, &subscription.Movie.Name, &subscription.Status, &createdAt, &updatedAt,
-	)
-	if err != nil {
-		return Subscription{}, err
-	}
-	subscription.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
-	if err != nil {
-		return Subscription{}, err
-	}
-	subscription.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
-	return subscription, err
 }
 
 func newID() string {

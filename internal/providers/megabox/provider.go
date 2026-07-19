@@ -9,20 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"my-movie/internal/cache"
 	"my-movie/internal/domain"
 	"my-movie/internal/httpx"
+	"my-movie/internal/targets"
 )
-
-type catalog struct {
-	movies   []domain.Movie
-	theaters []domain.Theater
-}
 
 type Provider struct {
 	transport bookingTransport
 	now       func() time.Time
-	catalog   *cache.Cache[string, catalog]
 }
 
 func New(client *httpx.Client, now func() time.Time) *Provider {
@@ -36,66 +30,21 @@ func New(client *httpx.Client, now func() time.Time) *Provider {
 }
 
 func newProvider(transport bookingTransport, now func() time.Time) *Provider {
-	return &Provider{transport: transport, now: now, catalog: cache.New[string, catalog](10*time.Minute, now)}
+	return &Provider{transport: transport, now: now}
 }
 
 func (p *Provider) ID() domain.ProviderID { return domain.ProviderMegabox }
 
-func (p *Provider) SearchMovies(ctx context.Context, query string) ([]domain.Movie, error) {
-	catalog, err := p.loadCatalog(ctx)
-	if err != nil {
-		return nil, err
+func (p *Provider) FetchBranchSnapshot(ctx context.Context, branch domain.Branch) ([]domain.Showtime, error) {
+	if branch.Provider != domain.ProviderMegabox {
+		return nil, fmt.Errorf("megabox branch %q belongs to provider %q", branch.TheaterID, branch.Provider)
 	}
-	query = strings.ToLower(strings.TrimSpace(query))
-	result := make([]domain.Movie, 0, len(catalog.movies))
-	for _, movie := range catalog.movies {
-		if query == "" || strings.Contains(strings.ToLower(movie.Name), query) {
-			result = append(result, movie)
-		}
+	target, ok := targetForBranch(branch.TheaterID, "DBC")
+	if !ok {
+		return nil, fmt.Errorf("megabox branch %q is unsupported", branch.TheaterID)
 	}
-	return result, nil
-}
-
-func (p *Provider) SearchTheaters(ctx context.Context, query string) ([]domain.Theater, error) {
-	catalog, err := p.loadCatalog(ctx)
-	if err != nil {
-		return nil, err
-	}
-	query = strings.ToLower(strings.TrimSpace(query))
-	result := make([]domain.Theater, 0, len(catalog.theaters))
-	for _, theater := range catalog.theaters {
-		if query == "" || strings.Contains(strings.ToLower(theater.Name), query) {
-			result = append(result, theater)
-		}
-	}
-	return result, nil
-}
-
-func (p *Provider) FetchShowtimes(ctx context.Context, target domain.AlertTarget, movieID string) ([]domain.Showtime, error) {
-	if target.Provider != domain.ProviderMegabox {
-		return nil, fmt.Errorf("megabox target %q belongs to provider %q", target.ID, target.Provider)
-	}
-	theaterID := target.Theater.ID
-	catalog, err := p.loadCatalog(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var theater domain.Theater
-	if !containsMovie(catalog.movies, movieID) {
-		return nil, fmt.Errorf("megabox movie %q is not in the catalog", movieID)
-	}
-	for _, candidate := range catalog.theaters {
-		if candidate.ID == theaterID {
-			theater = candidate
-			break
-		}
-	}
-	if theater.ID == "" {
-		return nil, fmt.Errorf("megabox theater %q is not in the catalog", theaterID)
-	}
-
 	currentDate := p.now().Format("20060102")
-	first, err := p.transport.selected(ctx, selection{MovieID: movieID, TheaterID: theaterID, AreaCode: theater.AreaCode, PlayDate: currentDate})
+	first, err := p.transport.selected(ctx, selection{TheaterID: branch.TheaterID, AreaCode: branch.AreaCode, PlayDate: currentDate, AuditoriumCode: "DBC"})
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +60,7 @@ func (p *Provider) FetchShowtimes(ctx context.Context, target domain.AlertTarget
 		if playDate == currentDate {
 			continue
 		}
-		response, err := p.transport.selected(ctx, selection{MovieID: movieID, TheaterID: theaterID, AreaCode: theater.AreaCode, PlayDate: playDate})
+		response, err := p.transport.selected(ctx, selection{TheaterID: branch.TheaterID, AreaCode: branch.AreaCode, PlayDate: playDate, AuditoriumCode: "DBC"})
 		if err != nil {
 			return nil, err
 		}
@@ -120,37 +69,63 @@ func (p *Provider) FetchShowtimes(ctx context.Context, target domain.AlertTarget
 		}
 		responses = append(responses, response)
 	}
-
 	byID := make(map[string]domain.Showtime)
 	for _, response := range responses {
-		for _, schedule := range response.MovieFormList {
-			if err := schedule.validate(); err != nil {
+		for _, row := range response.MovieFormList {
+			if err := row.validate(); err != nil {
 				return nil, err
 			}
-			if schedule.BokdAbleAt != "Y" || schedule.BrchNo != theaterID || schedule.RpstMovieNo != movieID || schedule.TheabKindCd != target.AuditoriumCode {
+			if row.BokdAbleAt != "Y" || row.BrchNo != branch.TheaterID || row.TheabKindCd != "DBC" {
 				continue
 			}
-			playDate, startsAt, err := normalizeScheduleDateTime(schedule.PlayDe, schedule.PlayStartTime)
+			playDate, startsAt, err := normalizeScheduleDateTime(row.PlayDe, row.PlayStartTime)
 			if err != nil {
 				return nil, err
 			}
-			byID[schedule.PlaySchdlNo] = domain.Showtime{
-				Provider: domain.ProviderMegabox, TargetID: target.ID, TheaterID: theaterID, MovieID: movieID,
-				ExternalID: schedule.PlaySchdlNo, PlayDate: playDate,
-				StartsAt: startsAt, Auditorium: strings.TrimSpace(schedule.TheabExpoNm),
+			endsAt := ""
+			if row.PlayEndTime != "" {
+				_, endsAt, err = normalizeScheduleDateTime(row.PlayDe, row.PlayEndTime)
+				if err != nil {
+					return nil, err
+				}
+			}
+			remaining, total, seatsKnown := parseSeats(row.RestSeatCnt, row.TotSeatCnt)
+			byID[row.PlaySchdlNo] = domain.Showtime{
+				Provider: domain.ProviderMegabox, TargetID: target.ID,
+				TheaterID: branch.TheaterID, TheaterName: target.Theater.Name,
+				MovieID: row.RpstMovieNo, MovieName: strings.TrimSpace(row.MovieNm), MovieEnglishName: strings.TrimSpace(row.MovieEngNm),
+				ExternalID: row.PlaySchdlNo, PlayDate: playDate, StartsAt: startsAt, EndsAt: endsAt,
+				Auditorium: strings.TrimSpace(row.TheabExpoNm), Format: strings.TrimSpace(row.PlayKindNm), Rating: strings.TrimSpace(row.AdmisClassCdNm),
+				RemainingSeats: remaining, TotalSeats: total, SeatCountKnown: seatsKnown, PosterURL: strings.TrimSpace(row.MoviePosterImg),
 			}
 		}
 	}
-	showtimes := make([]domain.Showtime, 0, len(byID))
+	result := make([]domain.Showtime, 0, len(byID))
 	for _, showtime := range byID {
-		showtimes = append(showtimes, showtime)
+		result = append(result, showtime)
 	}
-	sort.Slice(showtimes, func(i, j int) bool {
-		left := showtimes[i].PlayDate + showtimes[i].StartsAt + showtimes[i].ExternalID
-		right := showtimes[j].PlayDate + showtimes[j].StartsAt + showtimes[j].ExternalID
-		return left < right
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].PlayDate+result[i].StartsAt+result[i].ExternalID < result[j].PlayDate+result[j].StartsAt+result[j].ExternalID
 	})
-	return showtimes, nil
+	return result, nil
+}
+
+func targetForBranch(theaterID, auditoriumCode string) (domain.AlertTarget, bool) {
+	for _, target := range targets.All() {
+		if target.Provider == domain.ProviderMegabox && target.Theater.ID == theaterID && target.AuditoriumCode == auditoriumCode {
+			return target, true
+		}
+	}
+	return domain.AlertTarget{}, false
+}
+
+func parseSeats(remainingRaw, totalRaw flexibleText) (int, int, bool) {
+	remaining, remainingErr := strconv.Atoi(strings.TrimSpace(string(remainingRaw)))
+	total, totalErr := strconv.Atoi(strings.TrimSpace(string(totalRaw)))
+	if remainingErr != nil || totalErr != nil || remaining < 0 || total < 0 {
+		return 0, 0, false
+	}
+	return remaining, total, true
 }
 
 func normalizeScheduleDateTime(playDate, startsAt string) (string, string, error) {
@@ -176,35 +151,6 @@ func (p *Provider) BuildBookingLinks(target domain.AlertTarget, movieID string) 
 		App: "https://m.megabox.co.kr/re/AppOnly/booking?" + query.Encode(),
 		Web: "https://www.megabox.co.kr/booking?" + query.Encode(),
 	}
-}
-
-func (p *Provider) loadCatalog(ctx context.Context) (catalog, error) {
-	return p.catalog.Get("catalog", func() (catalog, error) {
-		response, err := p.transport.bootstrap(ctx, p.now().Format("20060102"))
-		if err != nil {
-			return catalog{}, err
-		}
-		if err := response.validateCatalog(); err != nil {
-			return catalog{}, err
-		}
-		result := catalog{movies: make([]domain.Movie, 0, len(response.MovieList)), theaters: make([]domain.Theater, 0, len(response.AreaBrchList))}
-		for _, movie := range response.MovieList {
-			result.movies = append(result.movies, domain.Movie{ID: movie.MovieNo, Name: movie.MovieNm})
-		}
-		for _, theater := range response.AreaBrchList {
-			result.theaters = append(result.theaters, domain.Theater{ID: theater.BrchNo, Name: theater.BrchNm, AreaCode: theater.AreaCd})
-		}
-		return result, nil
-	})
-}
-
-func containsMovie(movies []domain.Movie, id string) bool {
-	for _, movie := range movies {
-		if movie.ID == id {
-			return true
-		}
-	}
-	return false
 }
 
 func bookableDates(input []dateResponse) ([]string, error) {

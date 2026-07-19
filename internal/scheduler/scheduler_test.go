@@ -11,48 +11,59 @@ import (
 	"my-movie/internal/domain"
 )
 
-func TestRunOncePollsEachGroupAndDeliversAfterScans(t *testing.T) {
-	store := &fakeStore{groups: []database.PollingGroup{
-		{Provider: domain.ProviderMegabox, TheaterID: "t1", MovieID: "m1"},
-		{Provider: domain.ProviderCGV, TheaterID: "t2", MovieID: "m2"},
+func TestRunOnceFetchesCGVBranchOnceAndSplitsEnabledTargets(t *testing.T) {
+	store := &fakeStore{states: []database.TargetState{
+		{TargetID: "cgv-yongsan-imax", Enabled: true},
+		{TargetID: "cgv-yongsan-4dx", Enabled: true},
+		{TargetID: "cgv-yongsan-screenx", Enabled: true},
 	}}
-	megabox := &fakeProvider{id: domain.ProviderMegabox}
-	cgv := &fakeProvider{id: domain.ProviderCGV, err: errors.New("upstream failed")}
+	provider := &fakeProvider{id: domain.ProviderCGV, showtimes: []domain.Showtime{
+		{TargetID: "cgv-yongsan-imax", ExternalID: "imax"},
+		{TargetID: "cgv-yongsan-4dx", ExternalID: "4dx"},
+	}}
 	delivery := &fakeDelivery{}
-	scheduler := New(store, delivery, map[domain.ProviderID]domain.TheaterProvider{
-		domain.ProviderMegabox: megabox, domain.ProviderCGV: cgv,
-	}, Options{Jitter: func() time.Duration { return 0 }, Sleep: noSleep, Now: time.Now})
-
-	if err := scheduler.RunOnce(context.Background()); err == nil {
-		t.Fatal("expected aggregated provider error")
-	}
-	if megabox.calls != 1 || cgv.calls != 1 {
-		t.Fatalf("calls megabox=%d cgv=%d", megabox.calls, cgv.calls)
-	}
-	if len(store.runs) != 2 || delivery.calls != 1 {
-		t.Fatalf("runs=%d deliveries=%d", len(store.runs), delivery.calls)
-	}
-	if len(store.scans) != 1 {
-		t.Fatalf("successful scans=%d", len(store.scans))
-	}
-}
-
-func TestRunOnceLimitsEachProviderToTwoConcurrentRequests(t *testing.T) {
-	store := &fakeStore{groups: []database.PollingGroup{
-		{Provider: domain.ProviderMegabox, TheaterID: "t1", MovieID: "m1"},
-		{Provider: domain.ProviderMegabox, TheaterID: "t2", MovieID: "m2"},
-		{Provider: domain.ProviderMegabox, TheaterID: "t3", MovieID: "m3"},
-	}}
-	provider := &fakeProvider{id: domain.ProviderMegabox, delay: 10 * time.Millisecond}
-	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]domain.TheaterProvider{
-		domain.ProviderMegabox: provider,
-	}, Options{Jitter: func() time.Duration { return 0 }, Sleep: noSleep, Now: time.Now})
+	scheduler := New(store, delivery, map[domain.ProviderID]BranchProvider{domain.ProviderCGV: provider}, Options{Jitter: func() time.Duration { return 0 }, Sleep: noSleep, Now: time.Now})
 
 	if err := scheduler.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if provider.maxConcurrent != 2 {
-		t.Fatalf("max concurrency=%d", provider.maxConcurrent)
+	if provider.calls != 1 {
+		t.Fatalf("provider calls=%d", provider.calls)
+	}
+	if len(store.snapshots) != 3 || len(store.snapshots["cgv-yongsan-imax"]) != 1 || len(store.snapshots["cgv-yongsan-4dx"]) != 1 || len(store.snapshots["cgv-yongsan-screenx"]) != 0 {
+		t.Fatalf("snapshots=%+v", store.snapshots)
+	}
+	if delivery.calls != 1 || len(store.runs) != 1 || store.runs[0].Group.TheaterID != "0013" {
+		t.Fatalf("delivery=%d runs=%+v", delivery.calls, store.runs)
+	}
+}
+
+func TestRunOnceFetchesEachEnabledMegaboxBranch(t *testing.T) {
+	store := &fakeStore{states: []database.TargetState{
+		{TargetID: "megabox-coex-dolby", Enabled: true},
+		{TargetID: "megabox-namhyeona-dolby", Enabled: true},
+	}}
+	provider := &fakeProvider{id: domain.ProviderMegabox}
+	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]BranchProvider{domain.ProviderMegabox: provider}, Options{Jitter: func() time.Duration { return 0 }, Sleep: noSleep, Now: time.Now})
+
+	if err := scheduler.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("provider calls=%d", provider.calls)
+	}
+}
+
+func TestFailedBranchDoesNotRecordTargetSnapshots(t *testing.T) {
+	store := &fakeStore{states: []database.TargetState{{TargetID: "cgv-yongsan-imax", Enabled: true}}}
+	provider := &fakeProvider{id: domain.ProviderCGV, err: errors.New("upstream failed")}
+	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]BranchProvider{domain.ProviderCGV: provider}, Options{Jitter: func() time.Duration { return 0 }, Sleep: noSleep, Now: time.Now})
+
+	if err := scheduler.RunOnce(context.Background()); err == nil {
+		t.Fatal("expected provider error")
+	}
+	if len(store.snapshots) != 0 || len(store.runs) != 1 || store.runs[0].Succeeded {
+		t.Fatalf("snapshots=%v runs=%+v", store.snapshots, store.runs)
 	}
 }
 
@@ -60,12 +71,11 @@ func TestRunOnceRejectsOverlappingCycle(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	provider := &fakeProvider{id: domain.ProviderMegabox, started: started, release: release}
-	store := &fakeStore{groups: []database.PollingGroup{{Provider: domain.ProviderMegabox, TheaterID: "t1", MovieID: "m1"}}}
-	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]domain.TheaterProvider{domain.ProviderMegabox: provider}, Options{Jitter: func() time.Duration { return 0 }, Sleep: noSleep, Now: time.Now})
+	store := &fakeStore{states: []database.TargetState{{TargetID: "megabox-coex-dolby", Enabled: true}}}
+	scheduler := New(store, &fakeDelivery{}, map[domain.ProviderID]BranchProvider{domain.ProviderMegabox: provider}, Options{Jitter: func() time.Duration { return 0 }, Sleep: noSleep, Now: time.Now})
 	done := make(chan error, 1)
 	go func() { done <- scheduler.RunOnce(context.Background()) }()
 	<-started
-
 	if err := scheduler.RunOnce(context.Background()); !errors.Is(err, ErrCycleRunning) {
 		t.Fatalf("error=%v", err)
 	}
@@ -87,19 +97,22 @@ func TestJitterStaysWithinTenSeconds(t *testing.T) {
 func noSleep(context.Context, time.Duration) error { return nil }
 
 type fakeStore struct {
-	mu     sync.Mutex
-	groups []database.PollingGroup
-	runs   []database.PollRun
-	scans  [][]domain.Showtime
+	mu        sync.Mutex
+	states    []database.TargetState
+	runs      []database.PollRun
+	snapshots map[string][]domain.Showtime
 }
 
-func (s *fakeStore) ListActivePollingGroups(context.Context) ([]database.PollingGroup, error) {
-	return s.groups, nil
+func (s *fakeStore) ListTargetStates(context.Context) ([]database.TargetState, error) {
+	return s.states, nil
 }
-func (s *fakeStore) RecordScan(_ context.Context, showtimes []domain.Showtime, _ string) error {
+func (s *fakeStore) RecordTargetSnapshotForState(_ context.Context, state database.TargetState, showtimes []domain.Showtime) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.scans = append(s.scans, showtimes)
+	if s.snapshots == nil {
+		s.snapshots = map[string][]domain.Showtime{}
+	}
+	s.snapshots[state.TargetID] = append([]domain.Showtime(nil), showtimes...)
 	return nil
 }
 func (s *fakeStore) RecordPollRun(_ context.Context, run database.PollRun) error {
@@ -114,45 +127,23 @@ type fakeDelivery struct{ calls int }
 func (d *fakeDelivery) DeliverPending(context.Context) error { d.calls++; return nil }
 
 type fakeProvider struct {
-	id            domain.ProviderID
-	err           error
-	delay         time.Duration
-	started       chan struct{}
-	release       chan struct{}
-	mu            sync.Mutex
-	calls         int
-	concurrent    int
-	maxConcurrent int
+	id        domain.ProviderID
+	showtimes []domain.Showtime
+	err       error
+	started   chan struct{}
+	release   chan struct{}
+	mu        sync.Mutex
+	calls     int
 }
 
-func (p *fakeProvider) ID() domain.ProviderID                                        { return p.id }
-func (p *fakeProvider) SearchMovies(context.Context, string) ([]domain.Movie, error) { return nil, nil }
-func (p *fakeProvider) SearchTheaters(context.Context, string) ([]domain.Theater, error) {
-	return nil, nil
-}
-func (p *fakeProvider) FetchShowtimes(_ context.Context, theaterID, movieID string) ([]domain.Showtime, error) {
+func (p *fakeProvider) ID() domain.ProviderID { return p.id }
+func (p *fakeProvider) FetchBranchSnapshot(context.Context, domain.Branch) ([]domain.Showtime, error) {
 	p.mu.Lock()
 	p.calls++
-	p.concurrent++
-	if p.concurrent > p.maxConcurrent {
-		p.maxConcurrent = p.concurrent
-	}
 	p.mu.Unlock()
 	if p.started != nil {
 		close(p.started)
 		<-p.release
 	}
-	if p.delay > 0 {
-		time.Sleep(p.delay)
-	}
-	p.mu.Lock()
-	p.concurrent--
-	p.mu.Unlock()
-	if p.err != nil {
-		return nil, p.err
-	}
-	return []domain.Showtime{{Provider: p.id, TheaterID: theaterID, MovieID: movieID, ExternalID: theaterID + movieID}}, nil
-}
-func (p *fakeProvider) BuildBookingLinks(string, string) domain.BookingLinks {
-	return domain.BookingLinks{}
+	return p.showtimes, p.err
 }

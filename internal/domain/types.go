@@ -7,26 +7,38 @@ const (
 	ProviderMegabox ProviderID = "megabox"
 )
 
-type Movie struct {
-	ID   string
-	Name string
-}
-
 type Theater struct {
 	ID       string
 	Name     string
 	AreaCode string
 }
 
+type Branch struct {
+	Provider    ProviderID
+	TheaterID   string
+	TheaterName string
+	AreaCode    string
+}
+
 type Showtime struct {
-	Provider   ProviderID
-	TargetID   string
-	TheaterID  string
-	MovieID    string
-	ExternalID string
-	PlayDate   string
-	StartsAt   string
-	Auditorium string
+	Provider         ProviderID
+	TargetID         string
+	TheaterID        string
+	TheaterName      string
+	MovieID          string
+	MovieName        string
+	MovieEnglishName string
+	ExternalID       string
+	PlayDate         string
+	StartsAt         string
+	EndsAt           string
+	Auditorium       string
+	Format           string
+	Rating           string
+	RemainingSeats   int
+	TotalSeats       int
+	SeatCountKnown   bool
+	PosterURL        string
 }
 
 type BookingLinks struct {

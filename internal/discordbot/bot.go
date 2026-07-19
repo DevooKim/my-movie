@@ -3,24 +3,29 @@ package discordbot
 import (
 	"context"
 	"fmt"
-	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
 	"my-movie/internal/database"
-	"my-movie/internal/domain"
-	"my-movie/internal/providers"
 )
+
+type Controller interface {
+	Initialize(context.Context, string, string) (database.Installation, error)
+	SelectTarget(context.Context, string, string) error
+	Enable(context.Context, string, string) error
+	Disable(context.Context, string, string) error
+}
 
 type Bot struct {
 	session       *discordgo.Session
 	guildID       string
-	handler       *Handler
+	controller    Controller
 	removeHandler func()
 }
 
-func NewBot(session *discordgo.Session, guildID string, handler *Handler) *Bot {
-	return &Bot{session: session, guildID: guildID, handler: handler}
+func NewBot(session *discordgo.Session, guildID string, controller Controller) *Bot {
+	return &Bot{session: session, guildID: guildID, controller: controller}
 }
 
 func (b *Bot) Start() error {
@@ -50,109 +55,73 @@ func (b *Bot) handleInteraction(session *discordgo.Session, interaction *discord
 	if interaction.GuildID != b.guildID {
 		return
 	}
-	if interaction.Type != discordgo.InteractionApplicationCommand && interaction.Type != discordgo.InteractionApplicationCommandAutocomplete {
-		return
+	switch interaction.Type {
+	case discordgo.InteractionApplicationCommand:
+		if interaction.ApplicationCommandData().Name == "알림" {
+			b.handleCommand(session, interaction)
+		}
+	case discordgo.InteractionMessageComponent:
+		b.handleComponent(session, interaction)
 	}
-	if interaction.ApplicationCommandData().Name != "알림" {
-		return
-	}
-	if interaction.Type == discordgo.InteractionApplicationCommandAutocomplete {
-		b.handleAutocomplete(session, interaction)
-		return
-	}
-	b.handleCommand(session, interaction)
-}
-
-func (b *Bot) handleAutocomplete(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
-	data := interaction.ApplicationCommandData()
-	if len(data.Options) == 0 {
-		return
-	}
-	subcommand := data.Options[0]
-	values := optionValues(subcommand.Options)
-	focused, query := focusedOption(subcommand.Options)
-	var (
-		choices []Choice
-		err     error
-	)
-	switch {
-	case subcommand.Name == "등록" && focused == "지점":
-		choices, err = b.handler.TheaterChoices(context.Background(), domain.ProviderID(values["영화관"]), query)
-	case subcommand.Name == "등록" && focused == "영화":
-		choices, err = b.handler.MovieChoices(context.Background(), domain.ProviderID(values["영화관"]), query)
-	case subcommand.Name == "삭제" && focused == "알림":
-		choices, err = b.handler.DeleteChoices(context.Background(), interactionUserID(interaction), query)
-	}
-	if err != nil {
-		choices = nil
-	}
-	_ = session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-		Data: &discordgo.InteractionResponseData{Choices: discordChoices(choices)},
-	})
 }
 
 func (b *Bot) handleCommand(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
 	data := interaction.ApplicationCommandData()
-	if len(data.Options) == 0 {
-		b.respond(session, interaction, "하위 명령을 선택해주세요.")
+	if len(data.Options) != 1 || data.Options[0].Name != "초기화" {
+		b.respond(session, interaction, "알 수 없는 하위 명령입니다.")
 		return
 	}
-	subcommand := data.Options[0]
-	values := optionValues(subcommand.Options)
-	userID := interactionUserID(interaction)
-	switch subcommand.Name {
-	case "등록":
-		_ = session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
-		})
-		item, err := b.handler.Register(context.Background(), userID, domain.ProviderID(values["영화관"]), values["지점"], values["영화"])
-		content := fmt.Sprintf("등록했습니다: %s · %s · %s", providerName(item.Provider), item.Theater.Name, item.Movie.Name)
-		if err != nil {
-			content = "등록하지 못했습니다: " + err.Error()
-		}
-		_, _ = session.InteractionResponseEdit(interaction.Interaction, &discordgo.WebhookEdit{Content: &content})
-	case "목록":
-		items, err := b.handler.List(context.Background(), userID)
-		if err != nil {
-			b.respond(session, interaction, "목록을 불러오지 못했습니다: "+err.Error())
-			return
-		}
-		b.respond(session, interaction, formatSubscriptionList(items))
-	case "삭제":
-		if err := b.handler.Delete(context.Background(), userID, values["알림"]); err != nil {
-			b.respond(session, interaction, "삭제하지 못했습니다: "+err.Error())
-			return
-		}
-		b.respond(session, interaction, "알림을 삭제했습니다.")
-	case "전체삭제":
-		count, err := b.handler.DeleteAll(context.Background(), userID)
-		if err != nil {
-			b.respond(session, interaction, "삭제하지 못했습니다: "+err.Error())
-			return
-		}
-		b.respond(session, interaction, fmt.Sprintf("알림 %d개를 삭제했습니다.", count))
-	case "도움말":
-		b.respond(session, interaction, "`/알림 등록`으로 영화관·지점·영화를 고르면 새 예매 회차를 DM으로 알려드립니다. `/알림 목록`, `/알림 삭제`, `/알림 전체삭제`로 관리할 수 있습니다.")
-	default:
-		b.respond(session, interaction, "알 수 없는 하위 명령입니다.")
+	b.deferResponse(session, interaction)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	_, err := b.controller.Initialize(ctx, interaction.GuildID, interactionUserID(interaction))
+	content := "비공개 알림 채널과 제어 패널을 준비했습니다."
+	if err != nil {
+		content = "초기화하지 못했습니다: " + err.Error()
 	}
+	_, _ = session.InteractionResponseEdit(interaction.Interaction, &discordgo.WebhookEdit{Content: &content})
 }
 
-func formatSubscriptionList(items []database.Subscription) string {
-	if len(items) == 0 {
-		return "등록된 알림이 없습니다."
-	}
-	lines := make([]string, 0, len(items))
-	for _, item := range items {
-		line := fmt.Sprintf("• %s · %s · %s", providerName(item.Provider), item.Theater.Name, item.Movie.Name)
-		if item.Status == database.StatusDisabled {
-			line += " · 전달 불가(DM 설정 확인 필요)"
+func (b *Bot) handleComponent(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+	data := interaction.MessageComponentData()
+	userID := interactionUserID(interaction)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	var err error
+	if data.CustomID == "alerts:target" {
+		if len(data.Values) != 1 {
+			return
 		}
-		lines = append(lines, line)
+		b.deferResponse(session, interaction)
+		err = b.controller.SelectTarget(ctx, userID, data.Values[0])
+	} else if action, targetID, ok := parseComponentAction(data.CustomID); ok {
+		b.deferResponse(session, interaction)
+		if action == "enable" {
+			err = b.controller.Enable(ctx, userID, targetID)
+		} else {
+			err = b.controller.Disable(ctx, userID, targetID)
+		}
+		content := "설정을 반영했습니다."
+		if err != nil {
+			content = "설정을 변경하지 못했습니다: " + err.Error()
+		}
+		_, _ = session.InteractionResponseEdit(interaction.Interaction, &discordgo.WebhookEdit{Content: &content})
+		return
+	} else {
+		return
 	}
-	return strings.Join(lines, "\n")
+	content := "대상을 선택했습니다."
+	if err != nil {
+		content = "대상을 선택하지 못했습니다: " + err.Error()
+	}
+	_, _ = session.InteractionResponseEdit(interaction.Interaction, &discordgo.WebhookEdit{Content: &content})
+}
+
+func (b *Bot) deferResponse(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+	_ = session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
+	})
 }
 
 func (b *Bot) respond(session *discordgo.Session, interaction *discordgo.InteractionCreate, content string) {
@@ -175,12 +144,10 @@ func interactionUserID(interaction *discordgo.InteractionCreate) string {
 func NewSession(token string) (*discordgo.Session, error) {
 	session, err := discordgo.New("Bot " + token)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create session: %w", err)
 	}
 	session.Identify.Intents = discordgo.IntentsGuilds
 	return session, nil
 }
 
-func EnabledCommand(registry *providers.Registry) *discordgo.ApplicationCommand {
-	return Command(registry)
-}
+func EnabledCommand() *discordgo.ApplicationCommand { return Command() }

@@ -3,55 +3,64 @@ package discordbot
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bwmarrin/discordgo"
 
-	"my-movie/internal/database"
 	"my-movie/internal/domain"
 	"my-movie/internal/notification"
 )
 
-func TestNotifierBuildsAlertWithTwoHTTPSButtons(t *testing.T) {
+func TestNotifierSendsPlainMarkdownToTargetChannel(t *testing.T) {
 	session := &fakeDiscordSession{}
 	notifier := NewNotifier(session)
 	alert := notification.Alert{
-		Provider: domain.ProviderMegabox, Theater: domain.Theater{Name: "Gangnam"}, Movie: domain.Movie{Name: "Movie"},
-		PlayDate: "2026-07-20", Times: []string{"14:00", "18:30"},
-		Links: domain.BookingLinks{App: "https://m.megabox.co.kr/booking/", Web: "https://www.megabox.co.kr/booking"},
+		Provider: domain.ProviderCGV, TheaterName: "용산아이파크몰", AuditoriumName: "IMAX",
+		MovieName: "호프", PlayDate: "2026-07-19",
+		Sessions: []notification.Session{
+			{StartsAt: "19:10", EndsAt: "21:56", RemainingSeats: 57, TotalSeats: 144, SeatCountKnown: true},
+			{StartsAt: "22:30", EndsAt: "00:50"},
+		},
+		Links: domain.BookingLinks{App: "https://m.cgv.co.kr/booking", Web: "https://cgv.co.kr/ticket"},
 	}
 
-	if err := notifier.SendAlert(context.Background(), "u1", alert); err != nil {
+	if err := notifier.SendAlert(context.Background(), "imax-channel", alert); err != nil {
 		t.Fatal(err)
 	}
-	if len(session.sent.Components) != 1 {
-		t.Fatalf("components=%+v", session.sent.Components)
+	if session.channelID != "imax-channel" || len(session.sent.Embeds) != 0 {
+		t.Fatalf("channel=%q message=%+v", session.channelID, session.sent)
 	}
-	row := session.sent.Components[0].(discordgo.ActionsRow)
-	if len(row.Components) != 2 {
-		t.Fatalf("buttons=%+v", row.Components)
+	wantParts := []string{"**호프**", "📅 **2026년 7월 19일**", "⏰ **19:10 – 21:56**", "💺 잔여 57 / 144석", "⏰ **22:30 – 00:50**", "CGV 용산아이파크몰 · IMAX"}
+	for _, part := range wantParts {
+		if !strings.Contains(session.sent.Content, part) {
+			t.Fatalf("missing %q in %q", part, session.sent.Content)
+		}
+	}
+	if strings.Contains(session.sent.Content, "**CGV") || len(session.sent.Components) != 1 {
+		t.Fatalf("unexpected formatting: %+v", session.sent)
 	}
 }
 
-func TestNotifierMapsDiscordCannotSendDM(t *testing.T) {
-	session := &fakeDiscordSession{sendErr: &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 50007}}}
-	notifier := NewNotifier(session)
-
-	err := notifier.SendRegistrationConfirmation(context.Background(), "u1", database.Subscription{})
-	if !errors.Is(err, notification.ErrDMUnavailable) {
-		t.Fatalf("error=%v", err)
+func TestNotifierMapsMissingOrForbiddenChannel(t *testing.T) {
+	for _, code := range []int{10003, 50001, 50013} {
+		session := &fakeDiscordSession{sendErr: &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: code}}}
+		notifier := NewNotifier(session)
+		err := notifier.SendAlert(context.Background(), "missing", notification.Alert{Links: domain.BookingLinks{App: "https://app.example", Web: "https://web.example"}})
+		if !errors.Is(err, notification.ErrChannelUnavailable) {
+			t.Fatalf("code=%d error=%v", code, err)
+		}
 	}
 }
 
 type fakeDiscordSession struct {
-	sent    *discordgo.MessageSend
-	sendErr error
+	channelID string
+	sent      *discordgo.MessageSend
+	sendErr   error
 }
 
-func (s *fakeDiscordSession) UserChannelCreate(string, ...discordgo.RequestOption) (*discordgo.Channel, error) {
-	return &discordgo.Channel{ID: "dm1"}, nil
-}
-func (s *fakeDiscordSession) ChannelMessageSendComplex(_ string, message *discordgo.MessageSend, _ ...discordgo.RequestOption) (*discordgo.Message, error) {
+func (s *fakeDiscordSession) ChannelMessageSendComplex(channelID string, message *discordgo.MessageSend, _ ...discordgo.RequestOption) (*discordgo.Message, error) {
+	s.channelID = channelID
 	s.sent = message
 	return nil, s.sendErr
 }

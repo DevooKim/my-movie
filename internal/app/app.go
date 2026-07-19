@@ -8,15 +8,16 @@ import (
 	"time"
 
 	"my-movie/internal/config"
+	"my-movie/internal/control"
 	"my-movie/internal/database"
 	"my-movie/internal/discordbot"
+	"my-movie/internal/domain"
 	"my-movie/internal/health"
 	"my-movie/internal/httpx"
 	"my-movie/internal/notification"
-	"my-movie/internal/providers"
+	"my-movie/internal/providers/cgv"
 	"my-movie/internal/providers/megabox"
 	"my-movie/internal/scheduler"
-	"my-movie/internal/subscription"
 )
 
 type databaseCloser interface{ Close() error }
@@ -55,19 +56,37 @@ func New(configuration config.Config) (*App, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	repository := database.NewRepository(db, time.Now)
-	megaboxProvider := megabox.New(httpx.NewClient(httpx.Options{}), time.Now)
-	registry := providers.New(megaboxProvider)
+	httpClient := httpx.NewClient(httpx.Options{})
+	megaboxProvider := megabox.New(httpClient, time.Now)
+	cgvProvider := cgv.New("http://lightpanda:9222", time.Now)
 	session, err := discordbot.NewSession(configuration.DiscordBotToken)
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("create Discord session: %w", err)
 	}
 	notifier := discordbot.NewNotifier(session)
-	notifications := notification.NewService(repository, notifier, registry.Map())
-	subscriptions := subscription.NewService(repository, notifier, registry.Map())
-	commandHandler := discordbot.NewHandler(registry, subscriptions, repository)
-	bot := discordbot.NewBot(session, configuration.DiscordGuildID, commandHandler)
-	poller := scheduler.New(repository, notifications, registry.Map(), scheduler.Options{Interval: configuration.PollInterval})
+	linkProviders := map[domain.ProviderID]notification.LinkProvider{
+		domain.ProviderMegabox: megaboxProvider,
+		domain.ProviderCGV:     cgvProvider,
+	}
+	branchProviders := map[domain.ProviderID]scheduler.BranchProvider{
+		domain.ProviderMegabox: megaboxProvider,
+		domain.ProviderCGV:     cgvProvider,
+	}
+	controlProviders := map[domain.ProviderID]control.BranchProvider{
+		domain.ProviderMegabox: megaboxProvider,
+		domain.ProviderCGV:     cgvProvider,
+	}
+	channels := discordbot.NewChannelManager(session, func() string {
+		if session.State != nil && session.State.User != nil && session.State.User.ID != "" {
+			return session.State.User.ID
+		}
+		return configuration.DiscordApplicationID
+	})
+	controller := control.New(repository, channels, controlProviders)
+	notifications := notification.NewService(repository, notifier, linkProviders, controller)
+	bot := discordbot.NewBot(session, configuration.DiscordGuildID, controller)
+	poller := scheduler.New(repository, notifications, branchProviders, scheduler.Options{Interval: configuration.PollInterval})
 	healthHandler := health.NewHandler(repository, configuration.PollInterval, time.Now)
 	healthServer := health.NewServer(configuration.Port, healthHandler)
 	return newWithComponents(components{database: db, health: healthServer, discord: bot, scheduler: poller}), nil

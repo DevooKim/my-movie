@@ -12,14 +12,20 @@ import (
 
 	"my-movie/internal/database"
 	"my-movie/internal/domain"
+	"my-movie/internal/targets"
 )
 
 var ErrCycleRunning = errors.New("poll cycle is already running")
 
 type Store interface {
-	ListActivePollingGroups(context.Context) ([]database.PollingGroup, error)
-	RecordScan(context.Context, []domain.Showtime, string) error
+	ListTargetStates(context.Context) ([]database.TargetState, error)
+	RecordTargetSnapshotForState(context.Context, database.TargetState, []domain.Showtime) error
 	RecordPollRun(context.Context, database.PollRun) error
+}
+
+type BranchProvider interface {
+	ID() domain.ProviderID
+	FetchBranchSnapshot(context.Context, domain.Branch) ([]domain.Showtime, error)
 }
 
 type DeliveryService interface{ DeliverPending(context.Context) error }
@@ -34,7 +40,7 @@ type Options struct {
 type Scheduler struct {
 	store     Store
 	delivery  DeliveryService
-	providers map[domain.ProviderID]domain.TheaterProvider
+	providers map[domain.ProviderID]BranchProvider
 	interval  time.Duration
 	jitter    func() time.Duration
 	sleep     func(context.Context, time.Duration) error
@@ -44,7 +50,7 @@ type Scheduler struct {
 	done      chan struct{}
 }
 
-func New(store Store, delivery DeliveryService, providers map[domain.ProviderID]domain.TheaterProvider, options Options) *Scheduler {
+func New(store Store, delivery DeliveryService, providers map[domain.ProviderID]BranchProvider, options Options) *Scheduler {
 	interval := options.Interval
 	if interval == 0 {
 		interval = 5 * time.Minute
@@ -64,18 +70,28 @@ func New(store Store, delivery DeliveryService, providers map[domain.ProviderID]
 	return &Scheduler{store: store, delivery: delivery, providers: providers, interval: interval, jitter: jitter, sleep: sleep, now: now}
 }
 
+type branchGroup struct {
+	branch  domain.Branch
+	targets []enabledTarget
+}
+
+type enabledTarget struct {
+	target domain.AlertTarget
+	state  database.TargetState
+}
+
 func (s *Scheduler) RunOnce(ctx context.Context) error {
 	if !s.running.CompareAndSwap(false, true) {
 		return ErrCycleRunning
 	}
 	defer s.running.Store(false)
-	groups, err := s.store.ListActivePollingGroups(ctx)
+	states, err := s.store.ListTargetStates(ctx)
 	if err != nil {
 		return err
 	}
-	semaphores := make(map[domain.ProviderID]chan struct{})
-	for id := range s.providers {
-		semaphores[id] = make(chan struct{}, 2)
+	groups, err := enabledBranchGroups(states)
+	if err != nil {
+		return err
 	}
 	var (
 		waitGroup sync.WaitGroup
@@ -87,7 +103,7 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			if err := s.pollGroup(ctx, group, semaphores[group.Provider]); err != nil {
+			if err := s.pollBranch(ctx, group); err != nil {
 				mu.Lock()
 				cycleErrs = append(cycleErrs, err)
 				mu.Unlock()
@@ -101,38 +117,76 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 	return errors.Join(cycleErrs...)
 }
 
-func (s *Scheduler) pollGroup(ctx context.Context, group database.PollingGroup, semaphore chan struct{}) error {
+func enabledBranchGroups(states []database.TargetState) ([]branchGroup, error) {
+	byKey := map[string]*branchGroup{}
+	for _, state := range states {
+		if !state.Enabled {
+			continue
+		}
+		target, ok := targets.Find(state.TargetID)
+		if !ok {
+			return nil, fmt.Errorf("target %q is unavailable", state.TargetID)
+		}
+		key := string(target.Provider) + ":" + target.Theater.ID
+		group, ok := byKey[key]
+		if !ok {
+			group = &branchGroup{branch: domain.Branch{
+				Provider: target.Provider, TheaterID: target.Theater.ID,
+				TheaterName: target.Theater.Name, AreaCode: target.Theater.AreaCode,
+			}}
+			byKey[key] = group
+		}
+		group.targets = append(group.targets, enabledTarget{target: target, state: state})
+	}
+	groups := make([]branchGroup, 0, len(byKey))
+	for _, group := range byKey {
+		groups = append(groups, *group)
+	}
+	return groups, nil
+}
+
+func (s *Scheduler) pollBranch(ctx context.Context, group branchGroup) error {
 	startedAt := s.now()
 	if err := s.sleep(ctx, s.jitter()); err != nil {
 		return err
 	}
-	provider, ok := s.providers[group.Provider]
+	provider, ok := s.providers[group.branch.Provider]
 	if !ok {
-		err := fmt.Errorf("provider %q is unavailable", group.Provider)
-		return errors.Join(err, s.recordRun(ctx, group, startedAt, nil, err))
+		err := fmt.Errorf("provider %q is unavailable", group.branch.Provider)
+		return errors.Join(err, s.recordRun(ctx, group.branch, startedAt, nil, err))
 	}
-	select {
-	case semaphore <- struct{}{}:
-		defer func() { <-semaphore }()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	showtimes, fetchErr := provider.FetchShowtimes(ctx, group.TheaterID, group.MovieID)
+	showtimes, fetchErr := provider.FetchBranchSnapshot(ctx, group.branch)
 	resultErr := fetchErr
 	if fetchErr == nil {
-		resultErr = s.store.RecordScan(ctx, showtimes, "")
+		for _, enabled := range group.targets {
+			filtered := filterTarget(showtimes, enabled.target.ID)
+			if err := s.store.RecordTargetSnapshotForState(ctx, enabled.state, filtered); err != nil {
+				resultErr = errors.Join(resultErr, err)
+			}
+		}
 	}
-	recordErr := s.recordRun(ctx, group, startedAt, showtimes, resultErr)
+	recordErr := s.recordRun(ctx, group.branch, startedAt, showtimes, resultErr)
 	return errors.Join(resultErr, recordErr)
 }
 
-func (s *Scheduler) recordRun(ctx context.Context, group database.PollingGroup, startedAt time.Time, showtimes []domain.Showtime, runErr error) error {
+func filterTarget(showtimes []domain.Showtime, targetID string) []domain.Showtime {
+	filtered := make([]domain.Showtime, 0)
+	for _, showtime := range showtimes {
+		if showtime.TargetID == targetID {
+			filtered = append(filtered, showtime)
+		}
+	}
+	return filtered
+}
+
+func (s *Scheduler) recordRun(ctx context.Context, branch domain.Branch, startedAt time.Time, showtimes []domain.Showtime, runErr error) error {
 	errorSummary := ""
 	if runErr != nil {
 		errorSummary = runErr.Error()
 	}
 	return s.store.RecordPollRun(ctx, database.PollRun{
-		Group: group, StartedAt: startedAt, FinishedAt: s.now(), Succeeded: runErr == nil,
+		Group:     database.PollingGroup{Provider: branch.Provider, TheaterID: branch.TheaterID},
+		StartedAt: startedAt, FinishedAt: s.now(), Succeeded: runErr == nil,
 		ShowtimeCount: len(showtimes), ErrorSummary: errorSummary,
 	})
 }

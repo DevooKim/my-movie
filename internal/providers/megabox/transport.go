@@ -14,15 +14,15 @@ const (
 )
 
 type bookingTransport interface {
-	bootstrap(context.Context, string) (bookingResponse, error)
 	selected(context.Context, selection) (bookingResponse, error)
 }
 
 type selection struct {
-	MovieID   string
-	TheaterID string
-	AreaCode  string
-	PlayDate  string
+	MovieID        string
+	TheaterID      string
+	AreaCode       string
+	PlayDate       string
+	AuditoriumCode string
 }
 
 type bookingRequest struct {
@@ -67,15 +67,11 @@ func newHTTPTransport(client *httpx.Client, endpoint string) *httpTransport {
 	return &httpTransport{client: client, endpoint: endpoint}
 }
 
-func (t *httpTransport) bootstrap(ctx context.Context, playDate string) (bookingResponse, error) {
-	return t.request(ctx, bookingRequest{PlayDe: playDate, OnLoad: "Y"})
-}
-
 func (t *httpTransport) selected(ctx context.Context, input selection) (bookingResponse, error) {
 	return t.request(ctx, bookingRequest{
 		ArrMovieNo: input.MovieID, PlayDe: input.PlayDate, BrchNoListCnt: 1,
 		BrchNo1: input.TheaterID, AreaCd1: input.AreaCode, SpclbYn1: "N",
-		MovieNo1: input.MovieID,
+		MovieNo1: input.MovieID, TheabKindCd1: input.AuditoriumCode,
 	})
 }
 

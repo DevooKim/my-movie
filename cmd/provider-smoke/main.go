@@ -9,8 +9,9 @@ import (
 
 	"my-movie/internal/domain"
 	"my-movie/internal/httpx"
-	"my-movie/internal/providers"
+	"my-movie/internal/providers/cgv"
 	"my-movie/internal/providers/megabox"
+	"my-movie/internal/targets"
 )
 
 func main() { os.Exit(run(os.Args[1:])) }
@@ -20,37 +21,39 @@ func run(arguments []string) int {
 		fmt.Fprintln(os.Stderr, "usage: provider-smoke <megabox|cgv>")
 		return 1
 	}
-	registry := providers.New(megabox.New(httpx.NewClient(httpx.Options{}), time.Now))
+	client := httpx.NewClient(httpx.Options{})
 	providerID := domain.ProviderID(arguments[0])
-	provider, ok := registry.Get(providerID)
-	if !ok {
-		fmt.Fprintf(os.Stderr, "%s provider is disabled\n", providerID)
-		return 2
+	var provider interface {
+		FetchBranchSnapshot(context.Context, domain.Branch) ([]domain.Showtime, error)
+	}
+	if providerID == domain.ProviderMegabox {
+		provider = megabox.New(client, time.Now)
+	} else {
+		provider = cgv.New("http://lightpanda:9222", time.Now)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	movies, err := provider.SearchMovies(ctx, "")
+	var target domain.AlertTarget
+	for _, candidate := range targets.All() {
+		if candidate.Provider == providerID {
+			target = candidate
+			break
+		}
+	}
+	if target.ID == "" {
+		fmt.Fprintln(os.Stderr, "provider has no configured target")
+		return 2
+	}
+	showtimes, err := provider.FetchBranchSnapshot(ctx, domain.Branch{
+		Provider: providerID, TheaterID: target.Theater.ID,
+		TheaterName: target.Theater.Name, AreaCode: target.Theater.AreaCode,
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	theaters, err := provider.SearchTheaters(ctx, "")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	result := smokeResult{Provider: providerID, Movies: len(movies), Theaters: len(theaters)}
-	if len(movies) > 0 && len(theaters) > 0 {
-		showtimes, err := provider.FetchShowtimes(ctx, theaters[0].ID, movies[0].ID)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
-		result.Showtimes = len(showtimes)
-		if len(showtimes) == 0 {
-			fmt.Fprintln(os.Stderr, "showtime contract is inconclusive: first catalog pair returned no normalized showtimes")
-			return 1
-		}
+	result := smokeResult{Provider: providerID, Branch: target.Theater.Name, Showtimes: len(showtimes)}
+	if len(showtimes) > 0 {
 		result.Sample = &showtimes[0]
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
@@ -62,8 +65,7 @@ func run(arguments []string) int {
 
 type smokeResult struct {
 	Provider  domain.ProviderID `json:"provider"`
-	Movies    int               `json:"movies"`
-	Theaters  int               `json:"theaters"`
+	Branch    string            `json:"branch"`
 	Showtimes int               `json:"showtimes"`
 	Sample    *domain.Showtime  `json:"sample,omitempty"`
 }

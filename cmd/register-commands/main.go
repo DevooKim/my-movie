@@ -8,9 +8,6 @@ import (
 
 	"my-movie/internal/config"
 	"my-movie/internal/discordbot"
-	"my-movie/internal/httpx"
-	"my-movie/internal/providers"
-	"my-movie/internal/providers/megabox"
 )
 
 func main() {
@@ -22,11 +19,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	registry := providers.New(megabox.New(httpx.NewClient(httpx.Options{}), nil))
 	commands, err := session.ApplicationCommandBulkOverwrite(
 		configuration.DiscordApplicationID,
 		configuration.DiscordGuildID,
-		[]*discordgo.ApplicationCommand{discordbot.EnabledCommand(registry)},
+		[]*discordgo.ApplicationCommand{discordbot.EnabledCommand()},
 	)
 	if err != nil {
 		log.Fatal(err)

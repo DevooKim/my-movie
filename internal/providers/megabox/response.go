@@ -1,6 +1,34 @@
 package megabox
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+type flexibleText string
+
+func (value *flexibleText) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "null" {
+		*value = ""
+		return nil
+	}
+	if strings.HasPrefix(raw, `"`) {
+		var decoded string
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			return err
+		}
+		*value = flexibleText(decoded)
+		return nil
+	}
+	if _, err := strconv.Atoi(raw); err != nil {
+		return fmt.Errorf("invalid numeric text %q", raw)
+	}
+	*value = flexibleText(raw)
+	return nil
+}
 
 type bookingResponse struct {
 	StatCd          int                `json:"statCd"`
@@ -29,15 +57,23 @@ type dateResponse struct {
 }
 
 type scheduleResponse struct {
-	PlaySchdlNo   string `json:"playSchdlNo"`
-	BrchNo        string `json:"brchNo"`
-	MovieNo       string `json:"movieNo"`
-	RpstMovieNo   string `json:"rpstMovieNo"`
-	PlayDe        string `json:"playDe"`
-	PlayStartTime string `json:"playStartTime"`
-	TheabExpoNm   string `json:"theabExpoNm"`
-	TheabKindCd   string `json:"theabKindCd"`
-	BokdAbleAt    string `json:"bokdAbleAt"`
+	PlaySchdlNo    string       `json:"playSchdlNo"`
+	BrchNo         string       `json:"brchNo"`
+	MovieNo        string       `json:"movieNo"`
+	RpstMovieNo    string       `json:"rpstMovieNo"`
+	MovieNm        string       `json:"movieNm"`
+	MovieEngNm     string       `json:"movieEngNm"`
+	PlayDe         string       `json:"playDe"`
+	PlayStartTime  string       `json:"playStartTime"`
+	PlayEndTime    string       `json:"playEndTime"`
+	TheabExpoNm    string       `json:"theabExpoNm"`
+	TheabKindCd    string       `json:"theabKindCd"`
+	BokdAbleAt     string       `json:"bokdAbleAt"`
+	RestSeatCnt    flexibleText `json:"restSeatCnt"`
+	TotSeatCnt     flexibleText `json:"totSeatCnt"`
+	AdmisClassCdNm string       `json:"admisClassCdNm"`
+	PlayKindNm     string       `json:"playKindNm"`
+	MoviePosterImg string       `json:"moviePosterImg"`
 }
 
 func (r bookingResponse) validateStatus() error {

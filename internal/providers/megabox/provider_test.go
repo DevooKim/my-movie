@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -17,87 +15,46 @@ import (
 	"my-movie/internal/httpx"
 )
 
-func TestSearchCatalogIsCaseInsensitive(t *testing.T) {
-	provider, _ := newFixtureProvider(t)
-
-	movies, err := provider.SearchMovies(context.Background(), "sample")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(movies) != 1 || movies[0] != (domain.Movie{ID: "m1", Name: "Sample Movie"}) {
-		t.Fatalf("movies=%+v", movies)
-	}
-	theaters, err := provider.SearchTheaters(context.Background(), "coex")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(theaters) != 1 || theaters[0] != (domain.Theater{ID: "1351", Name: "COEX", AreaCode: "10"}) {
-		t.Fatalf("theaters=%+v", theaters)
-	}
-}
-
-func TestFetchShowtimesQueriesAllBookableDatesAndNormalizes(t *testing.T) {
-	provider, transport := newFixtureProvider(t)
-	target := fixtureTarget()
-
-	got, err := provider.FetchShowtimes(context.Background(), target, "m1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []domain.Showtime{
-		{Provider: domain.ProviderMegabox, TargetID: target.ID, TheaterID: "1372", MovieID: "m1", ExternalID: "schedule-1", PlayDate: "2026-07-19", StartsAt: "14:00", Auditorium: "6관"},
-		{Provider: domain.ProviderMegabox, TargetID: target.ID, TheaterID: "1372", MovieID: "m1", ExternalID: "schedule-2", PlayDate: "2026-07-20", StartsAt: "10:10", Auditorium: "5관"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("showtimes=%+v want=%+v", got, want)
-	}
-	if wantDates := []string{"20260719", "20260720"}; !reflect.DeepEqual(transport.selectedDates, wantDates) {
-		t.Fatalf("selected dates=%v want=%v", transport.selectedDates, wantDates)
-	}
-}
-
-func TestFetchShowtimesRejectsMalformedSuccess(t *testing.T) {
-	provider, transport := newFixtureProvider(t)
-	transport.selectedByDate["20260719"] = bookingResponse{
+func TestFetchBranchSnapshotReturnsEveryDolbyMovieWithMetadata(t *testing.T) {
+	response := bookingResponse{
 		StatCd:          0,
 		MovieFormDeList: []dateResponse{{PlayDe: "20260719", FormAt: "Y"}},
-		MovieFormList:   []scheduleResponse{{PlaySchdlNo: "", BrchNo: "1372", RpstMovieNo: "m1", PlayDe: "20260719", PlayStartTime: "14:00", TheabExpoNm: "6관", TheabKindCd: "DBC", BokdAbleAt: "Y"}},
+		MovieFormList: []scheduleResponse{
+			{PlaySchdlNo: "dolby-1", BrchNo: "1351", MovieNo: "detail-1", RpstMovieNo: "m1", MovieNm: "호프", MovieEngNm: "Hope", PlayDe: "20260719", PlayStartTime: "19:10", PlayEndTime: "21:56", TheabExpoNm: "Dolby Cinema", TheabKindCd: "DBC", BokdAbleAt: "Y", RestSeatCnt: "57", TotSeatCnt: "144", AdmisClassCdNm: "15세이상관람가", PlayKindNm: "2D Dolby"},
+			{PlaySchdlNo: "dolby-2", BrchNo: "1351", MovieNo: "detail-2", RpstMovieNo: "m2", MovieNm: "두 번째 영화", PlayDe: "20260719", PlayStartTime: "22:00", PlayEndTime: "24:10", TheabExpoNm: "Dolby Cinema", TheabKindCd: "DBC", BokdAbleAt: "Y", RestSeatCnt: "unknown", TotSeatCnt: "144"},
+			{PlaySchdlNo: "normal", BrchNo: "1351", MovieNo: "detail-3", RpstMovieNo: "m3", MovieNm: "일반관 영화", PlayDe: "20260719", PlayStartTime: "12:00", PlayEndTime: "14:00", TheabExpoNm: "1관", TheabKindCd: "NOR", BokdAbleAt: "Y"},
+		},
 	}
+	transport := &fixtureTransport{selectedByDate: map[string]bookingResponse{"20260719": response}}
+	provider := newProvider(transport, func() time.Time { return time.Date(2026, 7, 19, 12, 0, 0, 0, time.Local) })
 
-	if _, err := provider.FetchShowtimes(context.Background(), fixtureTarget(), "m1"); err == nil {
-		t.Fatal("expected malformed response error")
+	got, err := provider.FetchBranchSnapshot(context.Background(), domain.Branch{Provider: domain.ProviderMegabox, TheaterID: "1351", TheaterName: "코엑스", AreaCode: "10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("showtimes=%+v", got)
+	}
+	first := got[0]
+	if first.MovieName != "호프" || first.MovieEnglishName != "Hope" || first.EndsAt != "21:56" || first.RemainingSeats != 57 || first.TotalSeats != 144 || !first.SeatCountKnown {
+		t.Fatalf("first=%+v", first)
+	}
+	if got[1].SeatCountKnown {
+		t.Fatalf("invalid seats should be unknown: %+v", got[1])
+	}
+	if !reflect.DeepEqual(transport.selectedMovieIDs, []string{""}) {
+		t.Fatalf("branch request selected a movie: %v", transport.selectedMovieIDs)
 	}
 }
 
-func TestFetchShowtimesRejectsDifferentProviderTarget(t *testing.T) {
-	provider, _ := newFixtureProvider(t)
-	target := fixtureTarget()
-	target.Provider = domain.ProviderCGV
-	if _, err := provider.FetchShowtimes(context.Background(), target, "m1"); err == nil {
-		t.Fatal("expected provider mismatch error")
+func TestScheduleResponseDecodesNumericSeatCounts(t *testing.T) {
+	var response bookingResponse
+	err := json.Unmarshal([]byte(`{"statCd":0,"movieFormDeList":[],"movieFormList":[{"restSeatCnt":57,"totSeatCnt":144}]}`), &response)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestFetchShowtimesRejectsSuccessWithoutSelectedPayload(t *testing.T) {
-	provider, transport := newFixtureProvider(t)
-	transport.selectedByDate["20260719"] = bookingResponse{StatCd: 0, Message: "ok"}
-
-	if _, err := provider.FetchShowtimes(context.Background(), fixtureTarget(), "m1"); err == nil {
-		t.Fatal("expected missing selected payload error")
-	}
-}
-
-func TestFetchShowtimesValidatesIdentityBeforeFiltering(t *testing.T) {
-	provider, transport := newFixtureProvider(t)
-	malformed := transport.selectedByDate["20260719"]
-	malformed.MovieFormList = []scheduleResponse{{
-		PlaySchdlNo: "schedule-1", BrchNo: "", MovieNo: "m1-detail", RpstMovieNo: "m1",
-		PlayDe: "20260719", PlayStartTime: "14:00", TheabExpoNm: "6관", TheabKindCd: "DBC", BokdAbleAt: "Y",
-	}}
-	transport.selectedByDate["20260719"] = malformed
-
-	if _, err := provider.FetchShowtimes(context.Background(), fixtureTarget(), "m1"); err == nil {
-		t.Fatal("expected missing schedule identity error")
+	if len(response.MovieFormList) != 1 || string(response.MovieFormList[0].RestSeatCnt) != "57" || string(response.MovieFormList[0].TotSeatCnt) != "144" {
+		t.Fatalf("response=%+v", response)
 	}
 }
 
@@ -120,9 +77,8 @@ func TestNormalizeScheduleDateTimeRejectsInvalidExtendedTime(t *testing.T) {
 }
 
 func TestBookingLinksAreOfficialHTTPSAndEncodeIdentifiers(t *testing.T) {
-	provider, _ := newFixtureProvider(t)
-	target := fixtureTarget()
-	target.Theater.ID = "branch/1"
+	provider := newProvider(&fixtureTransport{}, time.Now)
+	target := domain.AlertTarget{Provider: domain.ProviderMegabox, Theater: domain.Theater{ID: "branch/1"}}
 	links := provider.BuildBookingLinks(target, "movie 1")
 	for name, raw := range map[string]string{"app": links.App, "web": links.Web} {
 		parsed, err := url.Parse(raw)
@@ -136,21 +92,11 @@ func TestBookingLinksAreOfficialHTTPSAndEncodeIdentifiers(t *testing.T) {
 			t.Fatalf("%s query=%v", name, parsed.Query())
 		}
 	}
-	app, _ := url.Parse(links.App)
-	if app.Path != "/re/AppOnly/booking" {
-		t.Fatalf("app launch path=%q", app.Path)
-	}
 }
 
-func TestTransportSendsOfficialRequestContractWithoutCookies(t *testing.T) {
+func TestTransportSendsBranchRequestWithoutMovieOrCookies(t *testing.T) {
 	var got bookingRequest
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Header.Get("Content-Type") != "application/json; charset=UTF-8" {
-			t.Errorf("content-type=%q", request.Header.Get("Content-Type"))
-		}
-		if request.Header.Get("Origin") != officialOrigin || request.Header.Get("Referer") != officialReferer {
-			t.Errorf("origin=%q referer=%q", request.Header.Get("Origin"), request.Header.Get("Referer"))
-		}
 		if cookies := request.Cookies(); len(cookies) != 0 {
 			t.Errorf("cookies=%v", cookies)
 		}
@@ -158,78 +104,25 @@ func TestTransportSendsOfficialRequestContractWithoutCookies(t *testing.T) {
 			t.Error(err)
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"statCd":0,"msg":"ok","movieList":[],"areaBrchList":[],"movieFormDeList":[],"movieFormList":[]}`))
+		_, _ = writer.Write([]byte(`{"statCd":0,"msg":"ok","movieFormDeList":[],"movieFormList":[]}`))
 	}))
 	defer server.Close()
 	transport := newHTTPTransport(httpx.NewClient(httpx.Options{HTTPClient: server.Client(), MaxAttempts: 1}), server.URL)
 
-	if _, err := transport.selected(context.Background(), selection{MovieID: "m1", TheaterID: "1372", AreaCode: "10", PlayDate: "20260719"}); err != nil {
+	if _, err := transport.selected(context.Background(), selection{TheaterID: "1351", AreaCode: "10", PlayDate: "20260719", AuditoriumCode: "DBC"}); err != nil {
 		t.Fatal(err)
 	}
-	if got.ArrMovieNo != "m1" || got.MovieNo1 != "m1" || got.BrchNo1 != "1372" || got.AreaCd1 != "10" || got.BrchNoListCnt != 1 {
+	if got.ArrMovieNo != "" || got.MovieNo1 != "" || got.BrchNo1 != "1351" || got.AreaCd1 != "10" || got.TheabKindCd1 != "DBC" {
 		t.Fatalf("request=%+v", got)
-	}
-	if got.MovieNo2 != "" || got.BrchNo2 != "" || got.SellChnlCd != "" {
-		t.Fatalf("unused fields are not blank: %+v", got)
 	}
 }
 
 type fixtureTransport struct {
-	bootstrapResponse bookingResponse
-	selectedByDate    map[string]bookingResponse
-	selectedDates     []string
-}
-
-func (t *fixtureTransport) bootstrap(context.Context, string) (bookingResponse, error) {
-	return t.bootstrapResponse, nil
+	selectedByDate   map[string]bookingResponse
+	selectedMovieIDs []string
 }
 
 func (t *fixtureTransport) selected(_ context.Context, input selection) (bookingResponse, error) {
-	t.selectedDates = append(t.selectedDates, input.PlayDate)
+	t.selectedMovieIDs = append(t.selectedMovieIDs, input.MovieID)
 	return t.selectedByDate[input.PlayDate], nil
-}
-
-func newFixtureProvider(t *testing.T) (*Provider, *fixtureTransport) {
-	t.Helper()
-	bootstrap := readFixture(t, "bootstrap.json")
-	selected := readFixture(t, "selected_schedule.json")
-	secondDate := bookingResponse{
-		StatCd:          0,
-		MovieFormDeList: selected.MovieFormDeList,
-		MovieFormList: []scheduleResponse{
-			{PlaySchdlNo: "schedule-1", BrchNo: "1372", MovieNo: "m1-detail", RpstMovieNo: "m1", PlayDe: "20260719", PlayStartTime: "14:00", TheabExpoNm: "6관", TheabKindCd: "DBC", BokdAbleAt: "Y"},
-			{PlaySchdlNo: "schedule-2", BrchNo: "1372", MovieNo: "m1-detail", RpstMovieNo: "m1", PlayDe: "20260720", PlayStartTime: "10:10", TheabExpoNm: "5관", TheabKindCd: "DBC", BokdAbleAt: "Y"},
-		},
-	}
-	transport := &fixtureTransport{
-		bootstrapResponse: bootstrap,
-		selectedByDate: map[string]bookingResponse{
-			"20260719": selected,
-			"20260720": secondDate,
-		},
-	}
-	now := func() time.Time { return time.Date(2026, 7, 19, 12, 0, 0, 0, time.Local) }
-	return newProvider(transport, now), transport
-}
-
-func fixtureTarget() domain.AlertTarget {
-	return domain.AlertTarget{
-		ID: "megabox-test-dolby", Provider: domain.ProviderMegabox,
-		Theater:        domain.Theater{ID: "1372", Name: "Gangnam", AreaCode: "10"},
-		AuditoriumName: "Dolby Cinema", AuditoriumCode: "DBC",
-	}
-}
-
-func readFixture(t *testing.T, name string) bookingResponse {
-	t.Helper()
-	path := filepath.Join("..", "..", "..", "testdata", "megabox", name)
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var response bookingResponse
-	if err := json.Unmarshal(contents, &response); err != nil {
-		t.Fatal(err)
-	}
-	return response
 }

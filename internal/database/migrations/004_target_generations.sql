@@ -1,0 +1,1 @@
+ALTER TABLE target_states ADD COLUMN generation INTEGER NOT NULL DEFAULT 1;
