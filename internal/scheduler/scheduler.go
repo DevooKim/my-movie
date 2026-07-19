@@ -197,6 +197,10 @@ func (s *Scheduler) Start(parent context.Context) {
 	s.done = make(chan struct{})
 	go func() {
 		defer close(s.done)
+		nextRun := nextBoundary(s.now(), s.interval)
+		if err := s.sleep(ctx, nextRun.Sub(s.now())); err != nil {
+			return
+		}
 		if err := s.RunOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("poll cycle failed", "error", err)
 		}
@@ -213,6 +217,14 @@ func (s *Scheduler) Start(parent context.Context) {
 			}
 		}
 	}()
+}
+
+func nextBoundary(now time.Time, interval time.Duration) time.Time {
+	boundary := now.Truncate(interval)
+	if boundary.Equal(now) {
+		return now
+	}
+	return boundary.Add(interval)
 }
 
 func (s *Scheduler) Stop(ctx context.Context) error {
