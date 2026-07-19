@@ -5,6 +5,7 @@ import (
 
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -44,6 +45,7 @@ func run(arguments []string) int {
 	}
 	time.Local = location
 	logger := logx.New(os.Stdout)
+	slog.SetDefault(logger)
 	application, err := app.New(configuration)
 	if err != nil {
 		logger.Error("application setup failed", "error", err)

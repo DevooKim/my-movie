@@ -61,6 +61,9 @@ func TestShutdownIsIdempotent(t *testing.T) {
 	if scheduler.stopCalls != 1 || discord.stopCalls != 1 || health.shutdownCalls != 1 || database.closeCalls != 1 {
 		t.Fatalf("stops scheduler=%d discord=%d health=%d database=%d", scheduler.stopCalls, discord.stopCalls, health.shutdownCalls, database.closeCalls)
 	}
+	if discord.stopAcceptingCalls != 1 {
+		t.Fatalf("stop accepting calls=%d", discord.stopAcceptingCalls)
+	}
 }
 
 func TestShutdownWaitsForPollToFinish(t *testing.T) {
@@ -80,6 +83,22 @@ func TestShutdownWaitsForPollToFinish(t *testing.T) {
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestShutdownDeadlineBoundsSchedulerWait(t *testing.T) {
+	release := make(chan struct{})
+	application := newWithComponents(components{
+		database: &fakeDatabase{}, health: &fakeHealth{}, discord: &fakeDiscord{},
+		scheduler: &fakeScheduler{stopBlock: release},
+	})
+	if err := application.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := application.Shutdown(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
 	}
 }
 
@@ -114,9 +133,10 @@ func (h *fakeHealth) Start() error {
 func (h *fakeHealth) Shutdown(context.Context) error { h.shutdownCalls++; return nil }
 
 type fakeDiscord struct {
-	startErr  error
-	stopCalls int
-	onStart   func()
+	startErr           error
+	stopAcceptingCalls int
+	stopCalls          int
+	onStart            func()
 }
 
 func (d *fakeDiscord) Start() error {
@@ -125,7 +145,8 @@ func (d *fakeDiscord) Start() error {
 	}
 	return d.startErr
 }
-func (d *fakeDiscord) Stop() error { d.stopCalls++; return nil }
+func (d *fakeDiscord) StopAccepting() error { d.stopAcceptingCalls++; return nil }
+func (d *fakeDiscord) Stop() error          { d.stopCalls++; return nil }
 
 type fakeScheduler struct {
 	startCalls int
@@ -140,9 +161,14 @@ func (s *fakeScheduler) Start(context.Context) {
 		s.onStart()
 	}
 }
-func (s *fakeScheduler) Stop() {
+func (s *fakeScheduler) Stop(ctx context.Context) error {
 	s.stopCalls++
 	if s.stopBlock != nil {
-		<-s.stopBlock
+		select {
+		case <-s.stopBlock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	return nil
 }

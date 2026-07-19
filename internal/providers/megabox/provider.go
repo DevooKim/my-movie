@@ -94,6 +94,9 @@ func (p *Provider) FetchShowtimes(ctx context.Context, theaterID, movieID string
 	if err != nil {
 		return nil, err
 	}
+	if err := first.validateSelected(); err != nil {
+		return nil, err
+	}
 	dates, err := bookableDates(first.MovieFormDeList)
 	if err != nil {
 		return nil, err
@@ -107,17 +110,20 @@ func (p *Provider) FetchShowtimes(ctx context.Context, theaterID, movieID string
 		if err != nil {
 			return nil, err
 		}
+		if err := response.validateSelected(); err != nil {
+			return nil, err
+		}
 		responses = append(responses, response)
 	}
 
 	byID := make(map[string]domain.Showtime)
 	for _, response := range responses {
 		for _, schedule := range response.MovieFormList {
-			if schedule.BokdAbleAt != "Y" || schedule.BrchNo != theaterID || schedule.RpstMovieNo != movieID {
-				continue
-			}
 			if err := schedule.validate(); err != nil {
 				return nil, err
+			}
+			if schedule.BokdAbleAt != "Y" || schedule.BrchNo != theaterID || schedule.RpstMovieNo != movieID {
+				continue
 			}
 			playDate, err := time.Parse("20060102", schedule.PlayDe)
 			if err != nil {
@@ -149,7 +155,7 @@ func (p *Provider) FetchShowtimes(ctx context.Context, theaterID, movieID string
 func (p *Provider) BuildBookingLinks(theaterID, movieID string) domain.BookingLinks {
 	query := url.Values{"rpstMovieNo": {movieID}, "brchNo1": {theaterID}}
 	return domain.BookingLinks{
-		App: "https://m.megabox.co.kr/booking/?" + query.Encode(),
+		App: "https://m.megabox.co.kr/re/AppOnly/booking?" + query.Encode(),
 		Web: "https://www.megabox.co.kr/booking?" + query.Encode(),
 	}
 }

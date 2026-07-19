@@ -47,9 +47,11 @@ func run(arguments []string) int {
 			return 1
 		}
 		result.Showtimes = len(showtimes)
-		if len(showtimes) > 0 {
-			result.Sample = &showtimes[0]
+		if len(showtimes) == 0 {
+			fmt.Fprintln(os.Stderr, "showtime contract is inconclusive: first catalog pair returned no normalized showtimes")
+			return 1
 		}
+		result.Sample = &showtimes[0]
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		fmt.Fprintln(os.Stderr, err)

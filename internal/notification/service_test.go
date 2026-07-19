@@ -78,6 +78,71 @@ func TestDeliverPendingDisablesSubscriptionWhenDMIsUnavailable(t *testing.T) {
 	assertDelivery(t, repository, subscription.ID, "megabox:s1", database.DeliveryFailed, 1)
 }
 
+func TestDeliveryStateSurvivesRestartWithoutDuplicateAlert(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "persistent.sqlite")
+	notifier := &recordingNotifier{}
+	providers := map[domain.ProviderID]domain.TheaterProvider{domain.ProviderMegabox: linkProvider{}}
+	ctx := context.Background()
+
+	db, err := database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := database.NewRepository(db, time.Now)
+	subscription, err := repository.CreateInitializingSubscription(ctx, database.CreateSubscriptionInput{
+		DiscordUserID: "u1", Provider: domain.ProviderMegabox,
+		Theater: domain.Theater{ID: "1372", Name: "Gangnam", AreaCode: "10"}, Movie: domain.Movie{ID: "m1", Name: "Movie"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := domain.Showtime{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1", ExternalID: "baseline", PlayDate: "2026-07-20", StartsAt: "10:00"}
+	if err := repository.RecordScan(ctx, []domain.Showtime{baseline}, subscription.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ActivateSubscription(ctx, subscription.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository = database.NewRepository(db, time.Now)
+	newShowtime := domain.Showtime{Provider: domain.ProviderMegabox, TheaterID: "1372", MovieID: "m1", ExternalID: "new", PlayDate: "2026-07-20", StartsAt: "14:00"}
+	if err := repository.RecordScan(ctx, []domain.Showtime{baseline, newShowtime}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewService(repository, notifier, providers).DeliverPending(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(notifier.alerts) != 1 || len(notifier.alerts[0].Times) != 1 || notifier.alerts[0].Times[0] != "14:00" {
+		t.Fatalf("alerts=%+v", notifier.alerts)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	repository = database.NewRepository(db, time.Now)
+	if err := repository.RecordScan(ctx, []domain.Showtime{baseline, newShowtime}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewService(repository, notifier, providers).DeliverPending(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(notifier.alerts) != 1 {
+		t.Fatalf("duplicate alerts=%d", len(notifier.alerts))
+	}
+}
+
 type recordingNotifier struct {
 	alerts   []Alert
 	alertErr error

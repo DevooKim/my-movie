@@ -68,6 +68,29 @@ func TestFetchShowtimesRejectsMalformedSuccess(t *testing.T) {
 	}
 }
 
+func TestFetchShowtimesRejectsSuccessWithoutSelectedPayload(t *testing.T) {
+	provider, transport := newFixtureProvider(t)
+	transport.selectedByDate["20260719"] = bookingResponse{StatCd: 0, Message: "ok"}
+
+	if _, err := provider.FetchShowtimes(context.Background(), "1372", "m1"); err == nil {
+		t.Fatal("expected missing selected payload error")
+	}
+}
+
+func TestFetchShowtimesValidatesIdentityBeforeFiltering(t *testing.T) {
+	provider, transport := newFixtureProvider(t)
+	malformed := transport.selectedByDate["20260719"]
+	malformed.MovieFormList = []scheduleResponse{{
+		PlaySchdlNo: "schedule-1", BrchNo: "", MovieNo: "m1-detail", RpstMovieNo: "m1",
+		PlayDe: "20260719", PlayStartTime: "14:00", TheabExpoNm: "6관", BokdAbleAt: "Y",
+	}}
+	transport.selectedByDate["20260719"] = malformed
+
+	if _, err := provider.FetchShowtimes(context.Background(), "1372", "m1"); err == nil {
+		t.Fatal("expected missing schedule identity error")
+	}
+}
+
 func TestBookingLinksAreOfficialHTTPSAndEncodeIdentifiers(t *testing.T) {
 	provider, _ := newFixtureProvider(t)
 	links := provider.BuildBookingLinks("branch/1", "movie 1")
@@ -82,6 +105,10 @@ func TestBookingLinksAreOfficialHTTPSAndEncodeIdentifiers(t *testing.T) {
 		if parsed.Query().Get("rpstMovieNo") != "movie 1" || parsed.Query().Get("brchNo1") != "branch/1" {
 			t.Fatalf("%s query=%v", name, parsed.Query())
 		}
+	}
+	app, _ := url.Parse(links.App)
+	if app.Path != "/re/AppOnly/booking" {
+		t.Fatalf("app launch path=%q", app.Path)
 	}
 }
 

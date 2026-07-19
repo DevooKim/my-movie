@@ -102,6 +102,27 @@ func TestRecordScanDoesNotOverwriteSentDelivery(t *testing.T) {
 	assertDeliveryStatus(t, repository, subscription.ID, "megabox:s1", DeliverySent)
 }
 
+func TestMarkSentRollsBackWholeGroupWhenAnyKeyIsMissing(t *testing.T) {
+	repository, closeDatabase := newTestRepository(t)
+	defer closeDatabase()
+	ctx := context.Background()
+	subscription, err := repository.CreateInitializingSubscription(ctx, subscriptionInput("u1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ActivateSubscription(ctx, subscription.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.RecordScan(ctx, []domain.Showtime{sampleShowtime("s1")}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repository.MarkSent(ctx, subscription.ID, []string{"megabox:s1", "megabox:missing"}); err == nil {
+		t.Fatal("expected grouped update error")
+	}
+	assertDeliveryStatus(t, repository, subscription.ID, "megabox:s1", DeliveryPending)
+}
+
 func TestOpenPersistsSubscriptionAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "persistent.sqlite")
 	ctx := context.Background()

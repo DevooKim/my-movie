@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -40,7 +41,7 @@ type Scheduler struct {
 	now       func() time.Time
 	running   atomic.Bool
 	cancel    context.CancelFunc
-	wait      sync.WaitGroup
+	done      chan struct{}
 }
 
 func New(store Store, delivery DeliveryService, providers map[domain.ProviderID]domain.TheaterProvider, options Options) *Scheduler {
@@ -139,10 +140,12 @@ func (s *Scheduler) recordRun(ctx context.Context, group database.PollingGroup, 
 func (s *Scheduler) Start(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
-	s.wait.Add(1)
+	s.done = make(chan struct{})
 	go func() {
-		defer s.wait.Done()
-		_ = s.RunOnce(ctx)
+		defer close(s.done)
+		if err := s.RunOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("poll cycle failed", "error", err)
+		}
 		ticker := time.NewTicker(s.interval)
 		defer ticker.Stop()
 		for {
@@ -150,17 +153,27 @@ func (s *Scheduler) Start(parent context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_ = s.RunOnce(ctx)
+				if err := s.RunOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					slog.Error("poll cycle failed", "error", err)
+				}
 			}
 		}
 	}()
 }
 
-func (s *Scheduler) Stop() {
+func (s *Scheduler) Stop(ctx context.Context) error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	s.wait.Wait()
+	if s.done == nil {
+		return nil
+	}
+	select {
+	case <-s.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func JitterFrom(random func() float64) time.Duration {

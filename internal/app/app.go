@@ -26,11 +26,12 @@ type healthServer interface {
 }
 type discordClient interface {
 	Start() error
+	StopAccepting() error
 	Stop() error
 }
 type pollScheduler interface {
 	Start(context.Context)
-	Stop()
+	Stop(context.Context) error
 }
 
 type components struct {
@@ -96,10 +97,12 @@ func (a *App) Shutdown(ctx context.Context) error {
 		if a.rootCancel != nil {
 			a.rootCancel()
 		}
+		stopAcceptingErr := a.discord.StopAccepting()
+		var schedulerErr error
 		if a.started {
-			a.scheduler.Stop()
+			schedulerErr = a.scheduler.Stop(ctx)
 		}
-		a.shutdownErr = errors.Join(a.discord.Stop(), a.health.Shutdown(ctx), a.database.Close())
+		a.shutdownErr = errors.Join(stopAcceptingErr, schedulerErr, a.discord.Stop(), a.health.Shutdown(ctx), a.database.Close())
 	})
 	return a.shutdownErr
 }

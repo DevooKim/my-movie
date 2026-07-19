@@ -7,6 +7,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"my-movie/internal/database"
 	"my-movie/internal/domain"
 	"my-movie/internal/providers"
 )
@@ -33,15 +34,26 @@ func (b *Bot) Start() error {
 }
 
 func (b *Bot) Stop() error {
+	b.StopAccepting()
+	return b.session.Close()
+}
+
+func (b *Bot) StopAccepting() error {
 	if b.removeHandler != nil {
 		b.removeHandler()
 		b.removeHandler = nil
 	}
-	return b.session.Close()
+	return nil
 }
 
 func (b *Bot) handleInteraction(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
-	if interaction.GuildID != b.guildID || interaction.ApplicationCommandData().Name != "알림" {
+	if interaction.GuildID != b.guildID {
+		return
+	}
+	if interaction.Type != discordgo.InteractionApplicationCommand && interaction.Type != discordgo.InteractionApplicationCommandAutocomplete {
+		return
+	}
+	if interaction.ApplicationCommandData().Name != "알림" {
 		return
 	}
 	if interaction.Type == discordgo.InteractionApplicationCommandAutocomplete {
@@ -107,15 +119,7 @@ func (b *Bot) handleCommand(session *discordgo.Session, interaction *discordgo.I
 			b.respond(session, interaction, "목록을 불러오지 못했습니다: "+err.Error())
 			return
 		}
-		if len(items) == 0 {
-			b.respond(session, interaction, "등록된 알림이 없습니다.")
-			return
-		}
-		lines := make([]string, 0, len(items))
-		for _, item := range items {
-			lines = append(lines, fmt.Sprintf("• %s · %s · %s", providerName(item.Provider), item.Theater.Name, item.Movie.Name))
-		}
-		b.respond(session, interaction, strings.Join(lines, "\n"))
+		b.respond(session, interaction, formatSubscriptionList(items))
 	case "삭제":
 		if err := b.handler.Delete(context.Background(), userID, values["알림"]); err != nil {
 			b.respond(session, interaction, "삭제하지 못했습니다: "+err.Error())
@@ -134,6 +138,21 @@ func (b *Bot) handleCommand(session *discordgo.Session, interaction *discordgo.I
 	default:
 		b.respond(session, interaction, "알 수 없는 하위 명령입니다.")
 	}
+}
+
+func formatSubscriptionList(items []database.Subscription) string {
+	if len(items) == 0 {
+		return "등록된 알림이 없습니다."
+	}
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		line := fmt.Sprintf("• %s · %s · %s", providerName(item.Provider), item.Theater.Name, item.Movie.Name)
+		if item.Status == database.StatusDisabled {
+			line += " · 전달 불가(DM 설정 확인 필요)"
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (b *Bot) respond(session *discordgo.Session, interaction *discordgo.InteractionCreate, content string) {

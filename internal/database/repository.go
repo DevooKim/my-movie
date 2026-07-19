@@ -270,17 +270,26 @@ func (r *Repository) RecordScan(ctx context.Context, showtimes []domain.Showtime
 }
 
 func (r *Repository) MarkSent(ctx context.Context, subscriptionID string, showtimeKeys []string) error {
+	transaction, err := r.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
 	for _, key := range showtimeKeys {
-		if _, err := r.database.ExecContext(ctx, `
+		result, err := transaction.ExecContext(ctx, `
 			UPDATE notification_deliveries
 			SET status = ?, attempt_count = attempt_count + 1, last_attempt_at = ?, last_error = NULL
-			WHERE subscription_id = ? AND showtime_key = ?`,
-			DeliverySent, formatTime(r.now()), subscriptionID, key,
-		); err != nil {
+			WHERE subscription_id = ? AND showtime_key = ? AND status = ?`,
+			DeliverySent, formatTime(r.now()), subscriptionID, key, DeliveryPending,
+		)
+		if err != nil {
+			return err
+		}
+		if err := requireChanged(result, "mark delivery sent"); err != nil {
 			return err
 		}
 	}
-	return nil
+	return transaction.Commit()
 }
 
 func (r *Repository) MarkFailedAttempt(ctx context.Context, subscriptionID string, showtimeKeys []string, message string, permanent bool) error {

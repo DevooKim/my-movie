@@ -22,16 +22,16 @@ type Notifier struct{ session MessageSession }
 
 func NewNotifier(session MessageSession) *Notifier { return &Notifier{session: session} }
 
-func (n *Notifier) SendRegistrationConfirmation(_ context.Context, userID string, item database.Subscription) error {
+func (n *Notifier) SendRegistrationConfirmation(ctx context.Context, userID string, item database.Subscription) error {
 	message := &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{{
 		Title:       "오픈 알림 등록 완료",
 		Description: fmt.Sprintf("%s · %s\n%s", providerName(item.Provider), item.Theater.Name, item.Movie.Name),
 		Color:       0x2ecc71,
 	}}}
-	return n.send(userID, message)
+	return n.send(ctx, userID, message)
 }
 
-func (n *Notifier) SendAlert(_ context.Context, userID string, alert notification.Alert) error {
+func (n *Notifier) SendAlert(ctx context.Context, userID string, alert notification.Alert) error {
 	if err := requireHTTPS(alert.Links.App, alert.Links.Web); err != nil {
 		return err
 	}
@@ -55,15 +55,15 @@ func (n *Notifier) SendAlert(_ context.Context, userID string, alert notificatio
 			discordgo.Button{Label: "웹에서 예매", Style: discordgo.LinkButton, URL: alert.Links.Web},
 		}}},
 	}
-	return n.send(userID, message)
+	return n.send(ctx, userID, message)
 }
 
-func (n *Notifier) send(userID string, message *discordgo.MessageSend) error {
-	channel, err := n.session.UserChannelCreate(userID)
+func (n *Notifier) send(ctx context.Context, userID string, message *discordgo.MessageSend) error {
+	channel, err := n.session.UserChannelCreate(userID, discordgo.WithContext(ctx))
 	if err != nil {
 		return classifyDiscordError(err)
 	}
-	_, err = n.session.ChannelMessageSendComplex(channel.ID, message)
+	_, err = n.session.ChannelMessageSendComplex(channel.ID, message, discordgo.WithContext(ctx))
 	return classifyDiscordError(err)
 }
 

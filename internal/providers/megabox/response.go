@@ -66,9 +66,19 @@ func (r bookingResponse) validateCatalog() error {
 	return nil
 }
 
+func (r bookingResponse) validateSelected() error {
+	if err := r.validateStatus(); err != nil {
+		return err
+	}
+	if r.MovieFormDeList == nil || r.MovieFormList == nil {
+		return fmt.Errorf("megabox selected response is missing schedule lists")
+	}
+	return nil
+}
+
 func (s scheduleResponse) validate() error {
 	if s.PlaySchdlNo == "" || s.BrchNo == "" || s.MovieNo == "" || s.RpstMovieNo == "" ||
-		s.PlayDe == "" || s.PlayStartTime == "" || s.TheabExpoNm == "" {
+		s.PlayDe == "" || s.PlayStartTime == "" || s.TheabExpoNm == "" || s.BokdAbleAt == "" {
 		return fmt.Errorf("megabox schedule is missing required fields")
 	}
 	return nil
