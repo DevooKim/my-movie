@@ -40,6 +40,58 @@ func TestNotifierSendsPlainMarkdownToTargetChannel(t *testing.T) {
 	if strings.Contains(session.sent.Content, "**CGV") || len(session.sent.Components) != 1 {
 		t.Fatalf("unexpected formatting: %+v", session.sent)
 	}
+	buttons := session.sent.Components[0].(discordgo.ActionsRow).Components
+	if len(buttons) != 1 {
+		t.Fatalf("buttons=%+v", buttons)
+	}
+}
+
+func TestNotifierUsesConfiguredAppLauncherForCGV(t *testing.T) {
+	session := &fakeDiscordSession{}
+	notifier := NewNotifier(session, "https://launcher.example/base")
+	alert := notification.Alert{
+		Provider: domain.ProviderCGV,
+		Links: domain.BookingLinks{
+			App: "https://m.cgv.co.kr/booking",
+			Web: "https://cgv.co.kr/ticket",
+		},
+	}
+
+	if err := notifier.SendAlert(context.Background(), "channel", alert); err != nil {
+		t.Fatal(err)
+	}
+	buttons := session.sent.Components[0].(discordgo.ActionsRow).Components
+	if len(buttons) != 1 {
+		t.Fatalf("buttons=%+v", buttons)
+	}
+	button := buttons[0].(discordgo.Button)
+	if button.URL != "https://launcher.example/base/cgv" || button.Label != "CGV 앱 열기" {
+		t.Fatalf("button=%+v", button)
+	}
+}
+
+func TestNotifierUsesConfiguredAppLauncherForMegabox(t *testing.T) {
+	session := &fakeDiscordSession{}
+	notifier := NewNotifier(session, "https://launcher.example")
+	alert := notification.Alert{
+		Provider: domain.ProviderMegabox,
+		Links: domain.BookingLinks{
+			App: "https://m.megabox.co.kr/booking",
+			Web: "https://www.megabox.co.kr/booking",
+		},
+	}
+
+	if err := notifier.SendAlert(context.Background(), "channel", alert); err != nil {
+		t.Fatal(err)
+	}
+	buttons := session.sent.Components[0].(discordgo.ActionsRow).Components
+	if len(buttons) != 1 {
+		t.Fatalf("buttons=%+v", buttons)
+	}
+	button := buttons[0].(discordgo.Button)
+	if button.URL != "https://launcher.example/megabox" || button.Label != "메가박스 앱 열기" {
+		t.Fatalf("button=%+v", button)
+	}
 }
 
 func TestNotifierMapsMissingOrForbiddenChannel(t *testing.T) {

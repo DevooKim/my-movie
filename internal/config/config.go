@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,6 +24,7 @@ type Config struct {
 	PollInterval         time.Duration
 	Port                 int
 	Timezone             string
+	AppLaunchBaseURL     string
 }
 
 func Load() (Config, error) {
@@ -46,6 +49,10 @@ func Load() (Config, error) {
 	if err != nil || port > 65535 {
 		return Config{}, fmt.Errorf("PORT must be between 1 and 65535")
 	}
+	appLaunchBaseURL, err := optionalHTTPSBaseURL("APP_LAUNCH_BASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		DiscordBotToken:      botToken,
@@ -55,7 +62,20 @@ func Load() (Config, error) {
 		PollInterval:         time.Duration(pollSeconds) * time.Second,
 		Port:                 port,
 		Timezone:             valueOrDefault("TZ", defaultTimezone),
+		AppLaunchBaseURL:     appLaunchBaseURL,
 	}, nil
+}
+
+func optionalHTTPSBaseURL(name string) (string, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("%s must be an HTTPS base URL without credentials, query, or fragment", name)
+	}
+	return strings.TrimRight(raw, "/"), nil
 }
 
 func required(name string) (string, error) {

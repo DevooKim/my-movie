@@ -18,20 +18,38 @@ type MessageSession interface {
 	ChannelMessageSendComplex(string, *discordgo.MessageSend, ...discordgo.RequestOption) (*discordgo.Message, error)
 }
 
-type Notifier struct{ session MessageSession }
+type Notifier struct {
+	session          MessageSession
+	appLaunchBaseURL string
+}
 
-func NewNotifier(session MessageSession) *Notifier { return &Notifier{session: session} }
+func NewNotifier(session MessageSession, appLaunchBaseURL ...string) *Notifier {
+	var baseURL string
+	if len(appLaunchBaseURL) > 0 {
+		baseURL = appLaunchBaseURL[0]
+	}
+	return &Notifier{session: session, appLaunchBaseURL: baseURL}
+}
 
 func (n *Notifier) SendAlert(ctx context.Context, channelID string, alert notification.Alert) error {
-	if err := requireHTTPS(alert.Links.App, alert.Links.Web); err != nil {
+	appButtonLabel := "앱에서 예매"
+	if n.appLaunchBaseURL != "" {
+		launchURL, err := url.JoinPath(n.appLaunchBaseURL, string(alert.Provider))
+		if err != nil {
+			return fmt.Errorf("build app launch URL: %w", err)
+		}
+		alert.Links.App = launchURL
+		appButtonLabel = providerDisplayName(alert.Provider) + " 앱 열기"
+	}
+	if err := requireHTTPS(alert.Links.App); err != nil {
 		return err
 	}
-	message := alertMessage(alert)
+	message := alertMessage(alert, appButtonLabel)
 	_, err := n.session.ChannelMessageSendComplex(channelID, message, discordgo.WithContext(ctx))
 	return classifyDiscordError(err)
 }
 
-func alertMessage(alert notification.Alert) *discordgo.MessageSend {
+func alertMessage(alert notification.Alert, appButtonLabel string) *discordgo.MessageSend {
 	var content strings.Builder
 	content.WriteString("🎬 새 예매 회차 오픈\n\n")
 	fmt.Fprintf(&content, "**%s**\n", alert.MovieName)
@@ -50,8 +68,7 @@ func alertMessage(alert notification.Alert) *discordgo.MessageSend {
 	return &discordgo.MessageSend{
 		Content: content.String(),
 		Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-			discordgo.Button{Label: "앱에서 예매", Style: discordgo.LinkButton, URL: alert.Links.App},
-			discordgo.Button{Label: "웹에서 예매", Style: discordgo.LinkButton, URL: alert.Links.Web},
+			discordgo.Button{Label: appButtonLabel, Style: discordgo.LinkButton, URL: alert.Links.App},
 		}}},
 	}
 }

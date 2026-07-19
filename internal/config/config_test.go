@@ -15,6 +15,30 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_SECONDS", "")
 	t.Setenv("PORT", "")
 	t.Setenv("TZ", "")
+	t.Setenv("APP_LAUNCH_BASE_URL", "")
+}
+
+func TestLoadAcceptsHTTPSAppLaunchBaseURL(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("APP_LAUNCH_BASE_URL", "https://example.lambda-url.ap-northeast-2.on.aws/")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppLaunchBaseURL != "https://example.lambda-url.ap-northeast-2.on.aws" {
+		t.Fatalf("base URL=%q", cfg.AppLaunchBaseURL)
+	}
+}
+
+func TestLoadRejectsNonHTTPSAppLaunchBaseURL(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("APP_LAUNCH_BASE_URL", "http://example.com")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "APP_LAUNCH_BASE_URL") {
+		t.Fatalf("err=%v", err)
+	}
 }
 
 func TestLoadUsesOperationalDefaults(t *testing.T) {

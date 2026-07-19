@@ -64,7 +64,7 @@ func New(configuration config.Config) (*App, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("create Discord session: %w", err)
 	}
-	notifier := discordbot.NewNotifier(session)
+	notifier := discordbot.NewNotifier(session, configuration.AppLaunchBaseURL)
 	linkProviders := map[domain.ProviderID]notification.LinkProvider{
 		domain.ProviderMegabox: megaboxProvider,
 		domain.ProviderCGV:     cgvProvider,
