@@ -152,19 +152,9 @@ func (s *Scheduler) runBurst(ctx context.Context, boundary time.Time) error {
 	if err != nil {
 		return err
 	}
-	prepareCtx, cancelPreparation := context.WithCancel(ctx)
-	prepared, preparationErr := s.prepareGroups(prepareCtx, groups)
+	prepared, preparationErr := s.prepareGroups(ctx, groups)
 	defer func() {
-		cancelPreparation()
 		closePreparedPolls(prepared)
-		if preparationsDone(prepared) {
-			return
-		}
-		releaseRunning = false
-		go func() {
-			waitForPreparations(prepared)
-			s.running.Store(false)
-		}()
 	}()
 
 	cycleErr := preparationErr
@@ -192,28 +182,6 @@ func closePreparedPolls(groups []preparedGroup) {
 	}
 }
 
-func preparationsDone(groups []preparedGroup) bool {
-	for _, group := range groups {
-		if group.done == nil {
-			continue
-		}
-		select {
-		case <-group.done:
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func waitForPreparations(groups []preparedGroup) {
-	for _, group := range groups {
-		if group.done != nil {
-			<-group.done
-		}
-	}
-}
-
 func (s *Scheduler) prepareGroups(ctx context.Context, groups []branchGroup) ([]preparedGroup, error) {
 	prepared := make([]preparedGroup, 0, len(groups))
 	var preparationErr error
@@ -228,21 +196,11 @@ func (s *Scheduler) prepareGroups(ctx context.Context, groups []branchGroup) ([]
 		item := preparedGroup{group: group, provider: provider}
 		preparer, ok := provider.(domain.BranchPreparer)
 		if ok {
-			ready := make(chan preparationResult)
-			done := make(chan struct{})
+			ready := make(chan preparationResult, 1)
 			item.ready = ready
-			item.done = done
 			go func(preparer domain.BranchPreparer, branch domain.Branch, ready chan<- preparationResult) {
-				defer close(done)
 				poll, err := preparer.PrepareBranch(ctx, branch)
-				result := preparationResult{poll: poll, err: err}
-				select {
-				case ready <- result:
-				case <-ctx.Done():
-					if poll != nil {
-						_ = poll.Close()
-					}
-				}
+				ready <- preparationResult{poll: poll, err: err}
 			}(preparer, group.branch, ready)
 		}
 		prepared = append(prepared, item)
