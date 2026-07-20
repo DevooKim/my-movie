@@ -136,6 +136,17 @@ type preparationResult struct {
 	err  error
 }
 
+type providerFetchError struct {
+	provider domain.ProviderID
+	err      error
+}
+
+func (e providerFetchError) Error() string {
+	return fmt.Sprintf("%s fetch: %v", e.provider, e.err)
+}
+
+func (e providerFetchError) Unwrap() error { return e.err }
+
 func (s *Scheduler) runBurst(ctx context.Context, boundary time.Time) error {
 	if !s.running.CompareAndSwap(false, true) {
 		return ErrCycleRunning
@@ -299,7 +310,10 @@ func (s *Scheduler) pollBranch(ctx context.Context, group branchGroup) error {
 func (s *Scheduler) pollBranchWithFetch(ctx context.Context, group branchGroup, fetch func(context.Context) ([]domain.Showtime, error)) error {
 	startedAt := s.now()
 	showtimes, fetchErr := fetch(ctx)
-	resultErr := fetchErr
+	var resultErr error
+	if fetchErr != nil {
+		resultErr = providerFetchError{provider: group.branch.Provider, err: fetchErr}
+	}
 	resultErr = errors.Join(resultErr, s.reportFetch(ctx, group.branch, fetchErr))
 	if fetchErr == nil {
 		for _, enabled := range group.targets {
@@ -371,10 +385,31 @@ func (s *Scheduler) Start(parent context.Context) {
 }
 
 func nextBurstBoundary(now time.Time, interval time.Duration, runErr error) time.Time {
-	if runErr != nil && !errors.Is(runErr, ErrCycleRunning) && !errors.Is(runErr, context.Canceled) {
+	if hasMegaboxFetchError(runErr) {
 		return now.Add(burstErrorBackoff)
 	}
 	return burstBoundary(now.Add(time.Nanosecond), interval)
+}
+
+func hasMegaboxFetchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if fetchErr, ok := err.(providerFetchError); ok {
+		return fetchErr.provider == domain.ProviderMegabox
+	}
+	if unwrapMany, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, wrapped := range unwrapMany.Unwrap() {
+			if hasMegaboxFetchError(wrapped) {
+				return true
+			}
+		}
+		return false
+	}
+	if unwrapOne, ok := err.(interface{ Unwrap() error }); ok {
+		return hasMegaboxFetchError(unwrapOne.Unwrap())
+	}
+	return false
 }
 
 func burstOffsets() []time.Duration {

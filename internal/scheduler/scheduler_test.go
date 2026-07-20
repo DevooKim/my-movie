@@ -109,9 +109,41 @@ func TestBurstBoundaryUsesOnlyExactCurrentBoundary(t *testing.T) {
 	}
 }
 
-func TestNextBurstBoundaryWaitsSixMinutesAfterFailure(t *testing.T) {
+func TestNextBurstBoundaryWaitsSixMinutesAfterMegaboxFetchFailure(t *testing.T) {
 	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
-	if got := nextBurstBoundary(now, time.Minute, errors.New("upstream failed")); !got.Equal(now.Add(6 * time.Minute)) {
+	runErr := providerFetchError{provider: domain.ProviderMegabox, err: errors.New("connection reset by peer")}
+	if got := nextBurstBoundary(now, time.Minute, runErr); !got.Equal(now.Add(6 * time.Minute)) {
+		t.Fatalf("boundary=%s", got)
+	}
+}
+
+func TestNextBurstBoundaryDoesNotBackoffCGVFetchFailure(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
+	runErr := providerFetchError{provider: domain.ProviderCGV, err: errors.New("unexpected EOF")}
+	if got := nextBurstBoundary(now, time.Minute, runErr); !got.Equal(time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)) {
+		t.Fatalf("boundary=%s", got)
+	}
+}
+
+func TestNextBurstBoundaryBacksOffWhenJoinedFailureIncludesMegabox(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
+	runErr := errors.Join(
+		providerFetchError{provider: domain.ProviderCGV, err: errors.New("unexpected EOF")},
+		errors.New("record poll run: database unavailable"),
+		providerFetchError{provider: domain.ProviderMegabox, err: errors.New("connection reset by peer")},
+	)
+	if got := nextBurstBoundary(now, time.Minute, runErr); !got.Equal(now.Add(6 * time.Minute)) {
+		t.Fatalf("boundary=%s", got)
+	}
+}
+
+func TestNextBurstBoundaryDoesNotBackoffJoinedCGVAndInternalFailures(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
+	runErr := errors.Join(
+		providerFetchError{provider: domain.ProviderCGV, err: errors.New("unexpected EOF")},
+		errors.New("record poll run: database unavailable"),
+	)
+	if got := nextBurstBoundary(now, time.Minute, runErr); !got.Equal(time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)) {
 		t.Fatalf("boundary=%s", got)
 	}
 }
