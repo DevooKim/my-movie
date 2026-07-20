@@ -2,6 +2,7 @@ package cgv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -30,6 +31,8 @@ type sessionOpener interface {
 type Provider struct {
 	transport transport
 	now       func() time.Time
+	pollsMu   sync.Mutex
+	polls     map[string]*preparedBranchPoll
 }
 
 func New(cdpURL string, now func() time.Time) *Provider {
@@ -39,7 +42,7 @@ func newProvider(transport transport, now func() time.Time) *Provider {
 	if now == nil {
 		now = time.Now
 	}
-	return &Provider{transport: transport, now: now}
+	return &Provider{transport: transport, now: now, polls: map[string]*preparedBranchPoll{}}
 }
 func (p *Provider) ID() domain.ProviderID { return domain.ProviderCGV }
 func (p *Provider) FetchBranchSnapshot(ctx context.Context, branch domain.Branch) ([]domain.Showtime, error) {
@@ -59,11 +62,22 @@ func (p *Provider) PrepareBranch(ctx context.Context, branch domain.Branch) (dom
 		return nil, fmt.Errorf("cgv branch %q belongs to provider %q", branch.TheaterID, branch.Provider)
 	}
 	if opener, ok := p.transport.(sessionOpener); ok {
+		key := branch.TheaterID
+		p.pollsMu.Lock()
+		defer p.pollsMu.Unlock()
+		if existing := p.polls[key]; existing != nil && existing.usable() {
+			return existing, nil
+		}
+		if existing := p.polls[key]; existing != nil {
+			_ = existing.forceClose()
+		}
 		prepared, err := opener.open(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return &preparedBranchPoll{provider: p, branch: branch, transport: prepared, close: prepared.Close}, nil
+		poll := &preparedBranchPoll{provider: p, branch: branch, transport: prepared, close: prepared.Close, persistent: true}
+		p.polls[key] = poll
+		return poll, nil
 	}
 	return &preparedBranchPoll{provider: p, branch: branch, transport: p.transport, close: func() error { return nil }}, nil
 }
@@ -77,6 +91,7 @@ type preparedBranchPoll struct {
 	mu          sync.Mutex
 	terminalErr error
 	closed      bool
+	persistent  bool
 }
 
 func (p *preparedBranchPoll) Fetch(ctx context.Context) ([]domain.Showtime, error) {
@@ -96,6 +111,13 @@ func (p *preparedBranchPoll) Fetch(ctx context.Context) ([]domain.Showtime, erro
 }
 
 func (p *preparedBranchPoll) Close() error {
+	if p.persistent {
+		return nil
+	}
+	return p.forceClose()
+}
+
+func (p *preparedBranchPoll) forceClose() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
@@ -103,6 +125,23 @@ func (p *preparedBranchPoll) Close() error {
 	}
 	p.closed = true
 	return p.close()
+}
+
+func (p *preparedBranchPoll) usable() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.closed && p.terminalErr == nil
+}
+
+func (p *Provider) ClosePrepared() error {
+	p.pollsMu.Lock()
+	defer p.pollsMu.Unlock()
+	var result error
+	for key, poll := range p.polls {
+		result = errors.Join(result, poll.forceClose())
+		delete(p.polls, key)
+	}
+	return result
 }
 
 func (p *Provider) fetchWithTransport(ctx context.Context, branch domain.Branch, source transport) ([]domain.Showtime, error) {

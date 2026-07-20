@@ -87,7 +87,7 @@ func TestRunOnceRejectsOverlappingCycle(t *testing.T) {
 }
 
 func TestBurstOffsetsCoverBoundaryThroughThirtySeconds(t *testing.T) {
-	want := []time.Duration{0, 5 * time.Second, 10 * time.Second, 15 * time.Second, 20 * time.Second, 25 * time.Second, 30 * time.Second}
+	want := []time.Duration{0}
 	got := burstOffsets()
 	if len(got) != len(want) {
 		t.Fatalf("offsets=%v", got)
@@ -99,17 +99,17 @@ func TestBurstOffsetsCoverBoundaryThroughThirtySeconds(t *testing.T) {
 	}
 }
 
-func TestBurstBoundaryUsesCurrentWindowThroughThirtySeconds(t *testing.T) {
+func TestBurstBoundaryUsesOnlyExactCurrentBoundary(t *testing.T) {
 	boundary := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	if got := burstBoundary(boundary.Add(10*time.Second), 5*time.Minute); !got.Equal(boundary) {
+	if got := burstBoundary(boundary, 30*time.Second); !got.Equal(boundary) {
 		t.Fatalf("boundary=%s", got)
 	}
-	if got := burstBoundary(boundary.Add(31*time.Second), 5*time.Minute); !got.Equal(boundary.Add(5 * time.Minute)) {
+	if got := burstBoundary(boundary.Add(time.Second), 30*time.Second); !got.Equal(boundary.Add(30 * time.Second)) {
 		t.Fatalf("boundary=%s", got)
 	}
 }
 
-func TestRunBurstPreparesCGVAndPollsEveryFiveSecondsThroughThirtySeconds(t *testing.T) {
+func TestRunBurstPreparesCGVAndPollsOnceAtBoundary(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 7, 19, 11, 59, 50, 0, time.UTC)}
 	cgv := &fakePreparingProvider{id: domain.ProviderCGV}
 	megabox := &fakeProvider{id: domain.ProviderMegabox}
@@ -127,16 +127,16 @@ func TestRunBurstPreparesCGVAndPollsEveryFiveSecondsThroughThirtySeconds(t *test
 	if err := scheduler.runBurst(context.Background(), boundary); err != nil {
 		t.Fatal(err)
 	}
-	if cgv.prepareCalls != 1 || cgv.poll.fetchCalls != 7 || cgv.poll.closeCalls != 1 {
+	if cgv.prepareCalls != 1 || cgv.poll.fetchCalls != 1 || cgv.poll.closeCalls != 1 {
 		t.Fatalf("cgv prepare=%d fetch=%d close=%d", cgv.prepareCalls, cgv.poll.fetchCalls, cgv.poll.closeCalls)
 	}
-	if megabox.calls != 7 {
+	if megabox.calls != 1 {
 		t.Fatalf("megabox calls=%d", megabox.calls)
 	}
-	if delivery.calls != 14 {
+	if delivery.calls != 2 {
 		t.Fatalf("delivery calls=%d", delivery.calls)
 	}
-	wantSleeps := []time.Duration{10 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second}
+	wantSleeps := []time.Duration{10 * time.Second}
 	if len(clock.sleeps) != len(wantSleeps) {
 		t.Fatalf("sleeps=%v", clock.sleeps)
 	}
@@ -177,7 +177,7 @@ func TestRunBurstDoesNotBlockMegaboxWhileCGVPrepares(t *testing.T) {
 		<-done
 		t.Fatal("Megabox polling waited for CGV preparation")
 	}
-	if megabox.calls != 7 {
+	if megabox.calls != 1 {
 		t.Fatalf("megabox calls=%d", megabox.calls)
 	}
 	if cgv.normalFetchCalls != 0 {

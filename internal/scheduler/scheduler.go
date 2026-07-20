@@ -17,9 +17,9 @@ import (
 var ErrCycleRunning = errors.New("poll cycle is already running")
 
 const (
-	prewarmLead = 10 * time.Second
+	prewarmLead = 5 * time.Second
 	burstStep   = 5 * time.Second
-	burstWindow = 30 * time.Second
+	burstWindow = 0
 )
 
 type Store interface {
@@ -440,6 +440,13 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 	}
 	select {
 	case <-s.done:
+		for _, provider := range s.providers {
+			if closer, ok := provider.(interface{ ClosePrepared() error }); ok {
+				if err := closer.ClosePrepared(); err != nil {
+					return err
+				}
+			}
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
