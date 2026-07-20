@@ -2,7 +2,7 @@ services:
   lightpanda:
     image: docker.io/lightpanda/browser:nightly
     restart: unless-stopped
-    mem_limit: 128m
+    mem_limit: 256m
 
   app:
     build: .
