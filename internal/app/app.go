@@ -15,6 +15,7 @@ import (
 	"my-movie/internal/health"
 	"my-movie/internal/httpx"
 	"my-movie/internal/notification"
+	"my-movie/internal/pollalert"
 	"my-movie/internal/providers/cgv"
 	"my-movie/internal/providers/megabox"
 	"my-movie/internal/scheduler"
@@ -86,7 +87,8 @@ func New(configuration config.Config) (*App, error) {
 	controller := control.New(repository, channels, controlProviders)
 	notifications := notification.NewService(repository, notifier, linkProviders, controller)
 	bot := discordbot.NewBot(session, configuration.DiscordGuildID, controller)
-	poller := scheduler.New(repository, notifications, branchProviders, scheduler.Options{Interval: configuration.PollInterval})
+	pollErrors := pollalert.New(repository, notifier)
+	poller := scheduler.New(repository, notifications, branchProviders, scheduler.Options{Interval: configuration.PollInterval, Reporter: pollErrors})
 	healthHandler := health.NewHandler(repository, configuration.PollInterval, time.Now)
 	healthServer := health.NewServer(configuration.Port, healthHandler)
 	return newWithComponents(components{database: db, health: healthServer, discord: bot, scheduler: poller}), nil

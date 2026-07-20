@@ -34,11 +34,13 @@ type BranchProvider interface {
 }
 
 type DeliveryService interface{ DeliverPending(context.Context) error }
+type PollReporter interface { Report(context.Context, database.PollingGroup, string, error) error }
 
 type Options struct {
 	Interval time.Duration
 	Sleep    func(context.Context, time.Duration) error
 	Now      func() time.Time
+	Reporter PollReporter
 }
 
 type Scheduler struct {
@@ -48,6 +50,7 @@ type Scheduler struct {
 	interval  time.Duration
 	sleep     func(context.Context, time.Duration) error
 	now       func() time.Time
+	reporter  PollReporter
 	running   atomic.Bool
 	cancel    context.CancelFunc
 	done      chan struct{}
@@ -66,7 +69,7 @@ func New(store Store, delivery DeliveryService, providers map[domain.ProviderID]
 	if now == nil {
 		now = time.Now
 	}
-	return &Scheduler{store: store, delivery: delivery, providers: providers, interval: interval, sleep: sleep, now: now}
+	return &Scheduler{store: store, delivery: delivery, providers: providers, interval: interval, sleep: sleep, now: now, reporter: options.Reporter}
 }
 
 type branchGroup struct {
@@ -279,6 +282,7 @@ func (s *Scheduler) collectPreparedGroups(ctx context.Context, groups []prepared
 			groups[index].err = result.err
 			if result.err != nil {
 				preparationErr = errors.Join(preparationErr, result.err, s.recordRun(ctx, groups[index].group.branch, s.now(), nil, result.err))
+				preparationErr = errors.Join(preparationErr, s.reportFetch(ctx, groups[index].group.branch, result.err))
 			}
 		default:
 		}
@@ -338,6 +342,7 @@ func (s *Scheduler) pollBranchWithFetch(ctx context.Context, group branchGroup, 
 	startedAt := s.now()
 	showtimes, fetchErr := fetch(ctx)
 	resultErr := fetchErr
+	resultErr = errors.Join(resultErr, s.reportFetch(ctx, group.branch, fetchErr))
 	if fetchErr == nil {
 		for _, enabled := range group.targets {
 			filtered := filterTarget(showtimes, enabled.target.ID)
@@ -348,6 +353,13 @@ func (s *Scheduler) pollBranchWithFetch(ctx context.Context, group branchGroup, 
 	}
 	recordErr := s.recordRun(ctx, group.branch, startedAt, showtimes, resultErr)
 	return errors.Join(resultErr, recordErr)
+}
+
+func (s *Scheduler) reportFetch(ctx context.Context, branch domain.Branch, fetchErr error) error {
+	if s.reporter == nil {
+		return nil
+	}
+	return s.reporter.Report(ctx, database.PollingGroup{Provider: branch.Provider, TheaterID: branch.TheaterID}, branch.TheaterName, fetchErr)
 }
 
 func filterTarget(showtimes []domain.Showtime, targetID string) []domain.Showtime {

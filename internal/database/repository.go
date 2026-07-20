@@ -36,6 +36,14 @@ type PollRun struct {
 	ErrorSummary  string
 }
 
+type PollAlertState struct {
+	Provider     domain.ProviderID
+	TheaterID    string
+	Failed       bool
+	ErrorSummary string
+	UpdatedAt    time.Time
+}
+
 type Installation struct {
 	GuildID          string
 	OwnerUserID      string
@@ -100,6 +108,30 @@ func (r *Repository) GetInstallation(ctx context.Context) (Installation, error) 
 		&installation.ControlChannelID, &installation.ControlMessageID,
 	)
 	return installation, err
+}
+
+func (r *Repository) GetPollAlertState(ctx context.Context, provider domain.ProviderID, theaterID string) (PollAlertState, error) {
+	var state PollAlertState
+	var updatedAt string
+	err := r.database.QueryRowContext(ctx, `
+		SELECT provider, theater_id, failed, error_summary, updated_at
+		FROM poll_alert_states WHERE provider = ? AND theater_id = ?`, provider, theaterID,
+	).Scan(&state.Provider, &state.TheaterID, &state.Failed, &state.ErrorSummary, &updatedAt)
+	if err != nil {
+		return PollAlertState{}, err
+	}
+	state.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+	return state, err
+}
+
+func (r *Repository) SavePollAlertState(ctx context.Context, state PollAlertState) error {
+	_, err := r.database.ExecContext(ctx, `
+		INSERT INTO poll_alert_states(provider, theater_id, failed, error_summary, updated_at)
+		VALUES(?, ?, ?, ?, ?)
+		ON CONFLICT(provider, theater_id) DO UPDATE SET
+		  failed=excluded.failed, error_summary=excluded.error_summary, updated_at=excluded.updated_at`,
+		state.Provider, state.TheaterID, state.Failed, state.ErrorSummary, formatTime(r.now()))
+	return err
 }
 
 func (r *Repository) SaveTargetState(ctx context.Context, state TargetState) error {

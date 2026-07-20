@@ -242,7 +242,7 @@ func TestMigrationThreePreservesDisabledLegacyRows(t *testing.T) {
 		t.Fatalf("legacy status=%q", status)
 	}
 	var version int
-	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
+	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 }

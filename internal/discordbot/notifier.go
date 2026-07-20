@@ -49,6 +49,11 @@ func (n *Notifier) SendAlert(ctx context.Context, channelID string, alert notifi
 	return classifyDiscordError(err)
 }
 
+func (n *Notifier) SendControlMessage(ctx context.Context, channelID, content string) error {
+	_, err := n.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{Content: content}, discordgo.WithContext(ctx))
+	return classifyDiscordError(err)
+}
+
 func alertMessage(alert notification.Alert, appButtonLabel string) *discordgo.MessageSend {
 	var content strings.Builder
 	content.WriteString("🎬 새 예매 회차 오픈\n\n")
