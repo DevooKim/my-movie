@@ -65,17 +65,19 @@ func (p *Provider) PrepareBranch(ctx context.Context, branch domain.Branch) (dom
 		key := branch.TheaterID
 		p.pollsMu.Lock()
 		defer p.pollsMu.Unlock()
-		if existing := p.polls[key]; existing != nil && existing.usable() {
-			return existing, nil
-		}
+		// A fresh Lightpanda session (browser tab) is opened every cycle and
+		// closed when the cycle ends. The tab's JS heap grows with each fetch,
+		// so reusing one tab across cycles leaks memory until the OOM-killer
+		// fires; a per-cycle tab keeps memory bounded.
 		if existing := p.polls[key]; existing != nil {
 			_ = existing.forceClose()
 		}
 		prepared, err := opener.open(ctx)
 		if err != nil {
+			delete(p.polls, key)
 			return nil, err
 		}
-		poll := &preparedBranchPoll{provider: p, branch: branch, transport: prepared, close: prepared.Close, persistent: true}
+		poll := &preparedBranchPoll{provider: p, branch: branch, transport: prepared, close: prepared.Close}
 		p.polls[key] = poll
 		return poll, nil
 	}
@@ -91,7 +93,6 @@ type preparedBranchPoll struct {
 	mu          sync.Mutex
 	terminalErr error
 	closed      bool
-	persistent  bool
 }
 
 func (p *preparedBranchPoll) Fetch(ctx context.Context) ([]domain.Showtime, error) {
@@ -108,18 +109,11 @@ func (p *preparedBranchPoll) Fetch(ctx context.Context) ([]domain.Showtime, erro
 	if err != nil {
 		p.terminalErr = err
 	}
-	closeOnError := err != nil && p.persistent
 	p.mu.Unlock()
-	if closeOnError {
-		_ = p.forceClose()
-	}
 	return showtimes, err
 }
 
 func (p *preparedBranchPoll) Close() error {
-	if p.persistent {
-		return nil
-	}
 	return p.forceClose()
 }
 
@@ -131,12 +125,6 @@ func (p *preparedBranchPoll) forceClose() error {
 	}
 	p.closed = true
 	return p.close()
-}
-
-func (p *preparedBranchPoll) usable() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return !p.closed && p.terminalErr == nil
 }
 
 func (p *Provider) ClosePrepared() error {

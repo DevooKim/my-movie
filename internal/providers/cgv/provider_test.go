@@ -43,7 +43,7 @@ func TestFetchBranchSnapshotRejectsRowsMissingStableIdentityBeforeFiltering(t *t
 	}
 }
 
-func TestPrepareBranchReturnsReusablePoll(t *testing.T) {
+func TestPrepareBranchServesBurstFromOneSession(t *testing.T) {
 	session := &preparedTransportFixture{fakeTransport: fakeTransport{
 		dateValues: []string{"20260719"},
 		showtimeValues: []showtimeResponse{{
@@ -58,7 +58,7 @@ func TestPrepareBranchReturnsReusablePoll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer poll.Close()
+	// A cycle's burst reuses the one session it prepared.
 	if _, err := poll.Fetch(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -66,11 +66,48 @@ func TestPrepareBranchReturnsReusablePoll(t *testing.T) {
 		t.Fatal(err)
 	}
 	if opener.openCalls != 1 || session.closeCalls != 0 {
-		t.Fatalf("open=%d close=%d", opener.openCalls, session.closeCalls)
+		t.Fatalf("during cycle: open=%d close=%d", opener.openCalls, session.closeCalls)
 	}
+	// Ending the cycle closes the tab so its heap is freed.
 	poll.Close()
 	if session.closeCalls != 1 {
 		t.Fatalf("close=%d", session.closeCalls)
+	}
+}
+
+func TestPrepareBranchOpensFreshSessionEachCycle(t *testing.T) {
+	session := &preparedTransportFixture{fakeTransport: fakeTransport{
+		dateValues: []string{"20260719"},
+		showtimeValues: []showtimeResponse{{
+			SiteNo: "0013", MovNo: "m1", MovNm: "호프", TcscnsGradCd: "03",
+			ScnYmd: "20260719", ScnsNo: "001", ScnSseq: "2", ScnsrtTm: "1910",
+		}},
+	}}
+	opener := &openingTransportFixture{session: session}
+	provider := newProvider(opener, time.Now)
+	branch := domain.Branch{Provider: domain.ProviderCGV, TheaterID: "0013"}
+
+	first, err := provider.PrepareBranch(context.Background(), branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+
+	second, err := provider.PrepareBranch(context.Background(), branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	second.Close()
+
+	// Two cycles → two fresh tabs opened and both closed.
+	if opener.openCalls != 2 || session.closeCalls != 2 {
+		t.Fatalf("open=%d close=%d", opener.openCalls, session.closeCalls)
 	}
 }
 
