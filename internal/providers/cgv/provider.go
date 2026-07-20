@@ -96,16 +96,22 @@ type preparedBranchPoll struct {
 
 func (p *preparedBranchPoll) Fetch(ctx context.Context) ([]domain.Showtime, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.closed {
+		p.mu.Unlock()
 		return nil, fmt.Errorf("cgv prepared poll is closed")
 	}
 	if p.terminalErr != nil {
+		p.mu.Unlock()
 		return nil, p.terminalErr
 	}
 	showtimes, err := p.provider.fetchWithTransport(ctx, p.branch, p.transport)
 	if err != nil {
 		p.terminalErr = err
+	}
+	closeOnError := err != nil && p.persistent
+	p.mu.Unlock()
+	if closeOnError {
+		_ = p.forceClose()
 	}
 	return showtimes, err
 }
