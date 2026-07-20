@@ -23,6 +23,7 @@ func TestDoJSONRetriesServerErrors(t *testing.T) {
 
 	var delays []time.Duration
 	client := NewClient(Options{
+		MaxAttempts: 3,
 		Sleep: func(_ context.Context, delay time.Duration) error {
 			delays = append(delays, delay)
 			return nil
@@ -40,6 +41,48 @@ func TestDoJSONRetriesServerErrors(t *testing.T) {
 	}
 	if len(delays) != 2 || delays[0] != 250*time.Millisecond || delays[1] != 500*time.Millisecond {
 		t.Fatalf("delays=%v", delays)
+	}
+}
+
+func TestDoJSONDefaultClientDoesNotRetryServerErrors(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		http.Error(w, "temporary", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	var output map[string]any
+	err := NewClient(Options{Sleep: noSleep}).DoJSON(
+		context.Background(),
+		Request{Method: http.MethodGet, URL: server.URL},
+		&output,
+		nil,
+	)
+	if err == nil || attempts != 1 {
+		t.Fatalf("err=%v attempts=%d", err, attempts)
+	}
+}
+
+func TestDoJSONDefaultClientDoesNotRetryTransportErrors(t *testing.T) {
+	attempts := 0
+	client := NewClient(Options{
+		HTTPClient: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			return nil, errors.New("connection reset by peer")
+		})},
+		Sleep: noSleep,
+	})
+
+	var output map[string]any
+	err := client.DoJSON(
+		context.Background(),
+		Request{Method: http.MethodGet, URL: "https://example.test"},
+		&output,
+		nil,
+	)
+	if err == nil || attempts != 1 {
+		t.Fatalf("err=%v attempts=%d", err, attempts)
 	}
 }
 
@@ -82,3 +125,9 @@ func TestDoJSONAppliesRequestTimeout(t *testing.T) {
 }
 
 func noSleep(context.Context, time.Duration) error { return nil }
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}

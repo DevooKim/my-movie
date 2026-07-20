@@ -50,7 +50,7 @@ func NewClient(options Options) *Client {
 	}
 	maxAttempts := options.MaxAttempts
 	if maxAttempts == 0 {
-		maxAttempts = 3
+		maxAttempts = 1
 	}
 	sleep := options.Sleep
 	if sleep == nil {
