@@ -86,8 +86,8 @@ func TestRunOnceRejectsOverlappingCycle(t *testing.T) {
 	}
 }
 
-func TestBurstOffsetsCoverBoundaryThroughThirtySeconds(t *testing.T) {
-	want := []time.Duration{0}
+func TestBurstOffsetsIncludeThreeAdditionalFiveSecondAttempts(t *testing.T) {
+	want := []time.Duration{0, 5 * time.Second, 10 * time.Second, 15 * time.Second}
 	got := burstOffsets()
 	if len(got) != len(want) {
 		t.Fatalf("offsets=%v", got)
@@ -104,27 +104,27 @@ func TestBurstBoundaryUsesOnlyExactCurrentBoundary(t *testing.T) {
 	if got := burstBoundary(boundary, 30*time.Second); !got.Equal(boundary) {
 		t.Fatalf("boundary=%s", got)
 	}
-	if got := burstBoundary(boundary.Add(time.Second), 30*time.Second); !got.Equal(boundary.Add(30 * time.Second)) {
+	if got := burstBoundary(boundary.Add(time.Second), 30*time.Second); !got.Equal(boundary) {
 		t.Fatalf("boundary=%s", got)
 	}
 }
 
 func TestNextBurstBoundaryWaitsSixMinutesAfterFailure(t *testing.T) {
-	now := time.Date(2026, 7, 20, 12, 0, 2, 0, time.UTC)
+	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
 	if got := nextBurstBoundary(now, time.Minute, errors.New("upstream failed")); !got.Equal(now.Add(6 * time.Minute)) {
 		t.Fatalf("boundary=%s", got)
 	}
 }
 
 func TestNextBurstBoundaryUsesRegularIntervalAfterSuccess(t *testing.T) {
-	now := time.Date(2026, 7, 20, 12, 0, 2, 0, time.UTC)
+	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
 	if got := nextBurstBoundary(now, time.Minute, nil); !got.Equal(time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)) {
 		t.Fatalf("boundary=%s", got)
 	}
 }
 
 func TestNextBurstBoundaryDoesNotBackoffNonReportableErrors(t *testing.T) {
-	now := time.Date(2026, 7, 20, 12, 0, 2, 0, time.UTC)
+	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
 	want := time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)
 	for _, runErr := range []error{ErrCycleRunning, context.Canceled} {
 		if got := nextBurstBoundary(now, time.Minute, runErr); !got.Equal(want) {
@@ -133,7 +133,7 @@ func TestNextBurstBoundaryDoesNotBackoffNonReportableErrors(t *testing.T) {
 	}
 }
 
-func TestRunBurstPreparesCGVAndPollsOnceAtBoundary(t *testing.T) {
+func TestRunBurstPreparesCGVAndPollsFourTimesInOneBurst(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 7, 19, 11, 59, 50, 0, time.UTC)}
 	cgv := &fakePreparingProvider{id: domain.ProviderCGV}
 	megabox := &fakeProvider{id: domain.ProviderMegabox}
@@ -151,16 +151,16 @@ func TestRunBurstPreparesCGVAndPollsOnceAtBoundary(t *testing.T) {
 	if err := scheduler.runBurst(context.Background(), boundary); err != nil {
 		t.Fatal(err)
 	}
-	if cgv.prepareCalls != 1 || cgv.poll.fetchCalls != 1 || cgv.poll.closeCalls != 1 {
+	if cgv.prepareCalls != 1 || cgv.poll.fetchCalls != 4 || cgv.poll.closeCalls != 1 {
 		t.Fatalf("cgv prepare=%d fetch=%d close=%d", cgv.prepareCalls, cgv.poll.fetchCalls, cgv.poll.closeCalls)
 	}
-	if megabox.calls != 1 {
+	if megabox.calls != 4 {
 		t.Fatalf("megabox calls=%d", megabox.calls)
 	}
-	if delivery.calls != 2 {
+	if delivery.calls != 8 {
 		t.Fatalf("delivery calls=%d", delivery.calls)
 	}
-	wantSleeps := []time.Duration{10 * time.Second}
+	wantSleeps := []time.Duration{10 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second}
 	if len(clock.sleeps) != len(wantSleeps) {
 		t.Fatalf("sleeps=%v", clock.sleeps)
 	}
@@ -168,6 +168,27 @@ func TestRunBurstPreparesCGVAndPollsOnceAtBoundary(t *testing.T) {
 		if clock.sleeps[index] != want {
 			t.Fatalf("sleep[%d]=%s want=%s", index, clock.sleeps[index], want)
 		}
+	}
+}
+
+func TestRunBurstRunsAllAttemptsWhenAnEarlierAttemptIsLate(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)}
+	advanced := false
+	megabox := &fakeProvider{id: domain.ProviderMegabox, afterFetch: func() {
+		if !advanced {
+			advanced = true
+			clock.Advance(6 * time.Second)
+		}
+	}}
+	store := &fakeStore{states: []database.TargetState{{TargetID: "megabox-coex-dolby", Enabled: true}}}
+	delivery := &fakeDelivery{}
+	scheduler := New(store, delivery, map[domain.ProviderID]BranchProvider{domain.ProviderMegabox: megabox}, Options{Sleep: clock.Sleep, Now: clock.Now})
+
+	if err := scheduler.runBurst(context.Background(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if megabox.calls != 4 || delivery.calls != 4 {
+		t.Fatalf("megabox=%d delivery=%d", megabox.calls, delivery.calls)
 	}
 }
 
@@ -201,7 +222,7 @@ func TestRunBurstDoesNotBlockMegaboxWhileCGVPrepares(t *testing.T) {
 		<-done
 		t.Fatal("Megabox polling waited for CGV preparation")
 	}
-	if megabox.calls != 1 {
+	if megabox.calls != 4 {
 		t.Fatalf("megabox calls=%d", megabox.calls)
 	}
 	if cgv.normalFetchCalls != 0 {
@@ -237,8 +258,8 @@ func TestRunBurstDoesNotWaitForUnresponsivePreparationDuringCleanup(t *testing.T
 		<-done
 		t.Fatal("burst cleanup waited for unresponsive preparation")
 	}
-	if err := scheduler.RunOnce(context.Background()); !errors.Is(err, ErrCycleRunning) {
-		t.Fatalf("overlapping run error=%v", err)
+	if err := scheduler.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once error=%v", err)
 	}
 	close(cgv.release)
 	<-cgv.finished
@@ -285,23 +306,28 @@ func (d *fakeDelivery) DeliverPending(context.Context) error {
 }
 
 type fakeProvider struct {
-	id        domain.ProviderID
-	showtimes []domain.Showtime
-	err       error
-	started   chan struct{}
-	release   chan struct{}
-	mu        sync.Mutex
-	calls     int
+	id         domain.ProviderID
+	showtimes  []domain.Showtime
+	err        error
+	started    chan struct{}
+	release    chan struct{}
+	afterFetch func()
+	mu         sync.Mutex
+	calls      int
 }
 
 func (p *fakeProvider) ID() domain.ProviderID { return p.id }
 func (p *fakeProvider) FetchBranchSnapshot(context.Context, domain.Branch) ([]domain.Showtime, error) {
 	p.mu.Lock()
 	p.calls++
+	afterFetch := p.afterFetch
 	p.mu.Unlock()
 	if p.started != nil {
 		close(p.started)
 		<-p.release
+	}
+	if afterFetch != nil {
+		afterFetch()
 	}
 	return p.showtimes, p.err
 }
@@ -394,4 +420,10 @@ func (c *fakeClock) Sleep(_ context.Context, duration time.Duration) error {
 	c.mu.Unlock()
 	runtime.Gosched()
 	return nil
+}
+
+func (c *fakeClock) Advance(duration time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(duration)
+	c.mu.Unlock()
 }

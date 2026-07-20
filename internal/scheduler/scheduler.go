@@ -19,7 +19,7 @@ var ErrCycleRunning = errors.New("poll cycle is already running")
 const (
 	prewarmLead       = 5 * time.Second
 	burstStep         = 5 * time.Second
-	burstWindow       = 0
+	burstWindow       = 15 * time.Second
 	burstErrorBackoff = 6 * time.Minute
 )
 
@@ -164,9 +164,6 @@ func (s *Scheduler) runBurst(ctx context.Context, boundary time.Time) error {
 	for _, offset := range burstOffsets() {
 		due := boundary.Add(offset)
 		now := s.now()
-		if due.Before(now) {
-			continue
-		}
 		if wait := due.Sub(now); wait > 0 {
 			if err := s.sleep(ctx, wait); err != nil {
 				return errors.Join(cycleErr, err)
