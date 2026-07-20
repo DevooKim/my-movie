@@ -109,6 +109,30 @@ func TestBurstBoundaryUsesOnlyExactCurrentBoundary(t *testing.T) {
 	}
 }
 
+func TestNextBurstBoundaryWaitsSixMinutesAfterFailure(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 2, 0, time.UTC)
+	if got := nextBurstBoundary(now, time.Minute, errors.New("upstream failed")); !got.Equal(now.Add(6 * time.Minute)) {
+		t.Fatalf("boundary=%s", got)
+	}
+}
+
+func TestNextBurstBoundaryUsesRegularIntervalAfterSuccess(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 2, 0, time.UTC)
+	if got := nextBurstBoundary(now, time.Minute, nil); !got.Equal(time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)) {
+		t.Fatalf("boundary=%s", got)
+	}
+}
+
+func TestNextBurstBoundaryDoesNotBackoffNonReportableErrors(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 2, 0, time.UTC)
+	want := time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)
+	for _, runErr := range []error{ErrCycleRunning, context.Canceled} {
+		if got := nextBurstBoundary(now, time.Minute, runErr); !got.Equal(want) {
+			t.Fatalf("error=%v boundary=%s", runErr, got)
+		}
+	}
+}
+
 func TestRunBurstPreparesCGVAndPollsOnceAtBoundary(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 7, 19, 11, 59, 50, 0, time.UTC)}
 	cgv := &fakePreparingProvider{id: domain.ProviderCGV}

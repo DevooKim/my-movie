@@ -17,9 +17,10 @@ import (
 var ErrCycleRunning = errors.New("poll cycle is already running")
 
 const (
-	prewarmLead = 5 * time.Second
-	burstStep   = 5 * time.Second
-	burstWindow = 0
+	prewarmLead       = 5 * time.Second
+	burstStep         = 5 * time.Second
+	burstWindow       = 0
+	burstErrorBackoff = 6 * time.Minute
 )
 
 type Store interface {
@@ -34,7 +35,9 @@ type BranchProvider interface {
 }
 
 type DeliveryService interface{ DeliverPending(context.Context) error }
-type PollReporter interface { Report(context.Context, database.PollingGroup, string, error) error }
+type PollReporter interface {
+	Report(context.Context, database.PollingGroup, string, error) error
+}
 
 type Options struct {
 	Interval time.Duration
@@ -356,21 +359,25 @@ func (s *Scheduler) Start(parent context.Context) {
 					return
 				}
 			}
-			if err := s.runBurst(ctx, boundary); err != nil {
-				if errors.Is(err, ErrCycleRunning) {
-					boundary = boundary.Add(s.interval)
-					continue
-				}
-				if !errors.Is(err, context.Canceled) {
-					slog.Error("poll burst failed", "error", err)
+			runErr := s.runBurst(ctx, boundary)
+			if runErr != nil {
+				if !errors.Is(runErr, ErrCycleRunning) && !errors.Is(runErr, context.Canceled) {
+					slog.Error("poll burst failed", "error", runErr)
 				}
 			}
 			if ctx.Err() != nil {
 				return
 			}
-			boundary = burstBoundary(s.now().Add(time.Nanosecond), s.interval)
+			boundary = nextBurstBoundary(s.now(), s.interval, runErr)
 		}
 	}()
+}
+
+func nextBurstBoundary(now time.Time, interval time.Duration, runErr error) time.Time {
+	if runErr != nil && !errors.Is(runErr, ErrCycleRunning) && !errors.Is(runErr, context.Canceled) {
+		return now.Add(burstErrorBackoff)
+	}
+	return burstBoundary(now.Add(time.Nanosecond), interval)
 }
 
 func burstOffsets() []time.Duration {
