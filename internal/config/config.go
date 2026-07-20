@@ -11,7 +11,7 @@ import (
 
 const (
 	defaultDatabasePath = "/data/my-movie.sqlite"
-	defaultPollSeconds  = 30
+	defaultPollSeconds  = 60
 	defaultPort         = 3000
 	defaultTimezone     = "Asia/Seoul"
 )
