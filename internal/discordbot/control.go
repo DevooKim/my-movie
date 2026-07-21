@@ -141,7 +141,7 @@ func (m *ChannelManager) ensureChannel(ctx context.Context, guildID, categoryID,
 		if channel, err := m.session.Channel(existingID, discordgo.WithContext(ctx)); err == nil && channel.GuildID == guildID && channel.Type == channelType {
 			edited, err := m.session.ChannelEditComplex(existingID, &discordgo.ChannelEdit{Name: name, ParentID: categoryID, PermissionOverwrites: overwrites}, discordgo.WithContext(ctx))
 			if err != nil {
-				return "", false, err
+				return "", false, m.channelMutationError(ctx, "edit existing", guildID, categoryID, existingID, name, overwrites, err)
 			}
 			return edited.ID, false, nil
 		}
@@ -155,7 +155,7 @@ func (m *ChannelManager) ensureChannel(ctx context.Context, guildID, categoryID,
 			if channel.Type == channelType && channel.Name == name && (channelType == discordgo.ChannelTypeGuildCategory || channel.ParentID == categoryID) {
 				edited, err := m.session.ChannelEditComplex(channel.ID, &discordgo.ChannelEdit{Name: name, ParentID: categoryID, PermissionOverwrites: overwrites}, discordgo.WithContext(ctx))
 				if err != nil {
-					return "", false, err
+					return "", false, m.channelMutationError(ctx, "edit recovered", guildID, categoryID, channel.ID, name, overwrites, err)
 				}
 				return edited.ID, false, nil
 			}
@@ -165,9 +165,78 @@ func (m *ChannelManager) ensureChannel(ctx context.Context, guildID, categoryID,
 		Name: name, Type: channelType, ParentID: categoryID, PermissionOverwrites: overwrites,
 	}, discordgo.WithContext(ctx))
 	if err != nil {
-		return "", false, err
+		return "", false, m.channelMutationError(ctx, "create", guildID, categoryID, existingID, name, overwrites, err)
 	}
 	return channel.ID, true, nil
+}
+
+func (m *ChannelManager) channelMutationError(ctx context.Context, operation, guildID, categoryID, existingID, name string, overwrites []*discordgo.PermissionOverwrite, cause error) error {
+	botID := m.botID()
+	details := []string{
+		"guild_id=" + guildID,
+		"bot_id=" + botID,
+		"category_id=" + valueOrNone(categoryID),
+		"existing_id=" + valueOrNone(existingID),
+		"overwrites=" + overwriteSummary(overwrites),
+	}
+
+	member, memberErr := m.session.GuildMember(guildID, botID, discordgo.WithContext(ctx))
+	roles, rolesErr := m.session.GuildRoles(guildID, discordgo.WithContext(ctx))
+	if memberErr != nil {
+		details = append(details, "bot_member_error="+strconv.Quote(memberErr.Error()))
+	}
+	if rolesErr != nil {
+		details = append(details, "guild_roles_error="+strconv.Quote(rolesErr.Error()))
+	}
+	if memberErr == nil && rolesErr == nil {
+		permissions := guildPermissions(guildID, member.Roles, roles)
+		administrator := permissions&discordgo.PermissionAdministrator != 0
+		details = append(details,
+			"guild_permissions="+strconv.FormatInt(permissions, 10),
+			"administrator="+strconv.FormatBool(administrator),
+			"manage_channels="+strconv.FormatBool(administrator || permissions&discordgo.PermissionManageChannels != 0),
+			"manage_roles="+strconv.FormatBool(administrator || permissions&discordgo.PermissionManageRoles != 0),
+		)
+	}
+
+	return fmt.Errorf("%s channel %q (%s): %w", operation, name, strings.Join(details, ", "), cause)
+}
+
+func guildPermissions(guildID string, memberRoleIDs []string, roles []*discordgo.Role) int64 {
+	roleIDs := make(map[string]struct{}, len(memberRoleIDs)+1)
+	roleIDs[guildID] = struct{}{}
+	for _, roleID := range memberRoleIDs {
+		roleIDs[roleID] = struct{}{}
+	}
+	var permissions int64
+	for _, role := range roles {
+		if _, ok := roleIDs[role.ID]; ok {
+			permissions |= role.Permissions
+		}
+	}
+	return permissions
+}
+
+func overwriteSummary(overwrites []*discordgo.PermissionOverwrite) string {
+	parts := make([]string, 0, len(overwrites))
+	for _, overwrite := range overwrites {
+		overwriteType := "role"
+		if overwrite.Type == discordgo.PermissionOverwriteTypeMember {
+			overwriteType = "member"
+		}
+		parts = append(parts, overwriteType+":"+overwrite.ID)
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, "|")
+}
+
+func valueOrNone(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return value
 }
 
 func (m *ChannelManager) EnsurePublicTextChannel(ctx context.Context, guildID, categoryID, existingID, name string) (string, bool, error) {
