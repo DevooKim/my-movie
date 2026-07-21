@@ -88,8 +88,8 @@ func New(configuration config.Config) (*App, error) {
 	notifications := notification.NewService(repository, notifier, linkProviders, controller)
 	bot := discordbot.NewBot(session, configuration.DiscordGuildID, controller)
 	pollErrors := pollalert.New(repository, notifier)
-	poller := scheduler.New(repository, notifications, branchProviders, scheduler.Options{Interval: configuration.PollInterval, Reporter: pollErrors})
-	healthHandler := health.NewHandler(repository, configuration.PollInterval, time.Now)
+	poller := scheduler.New(repository, notifications, branchProviders, scheduler.Options{Interval: config.PollInterval, Reporter: pollErrors})
+	healthHandler := health.NewHandler(repository, config.PollInterval, time.Now)
 	healthServer := health.NewServer(configuration.Port, healthHandler)
 	return newWithComponents(components{database: db, health: healthServer, discord: bot, scheduler: poller}), nil
 }

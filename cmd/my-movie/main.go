@@ -55,7 +55,7 @@ func run(arguments []string) int {
 		logger.Error("application startup failed", "error", err)
 		return 1
 	}
-	logger.Info("movie alert service started", "port", configuration.Port, "poll_interval", configuration.PollInterval)
+	logger.Info("movie alert service started", "port", configuration.Port, "poll_interval", config.PollInterval)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	<-signals

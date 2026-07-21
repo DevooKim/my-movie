@@ -3,7 +3,6 @@ package config
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 func setRequiredEnvironment(t *testing.T) {
@@ -12,7 +11,6 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("DISCORD_APPLICATION_ID", "123")
 	t.Setenv("DISCORD_GUILD_ID", "456")
 	t.Setenv("DATABASE_PATH", "")
-	t.Setenv("POLL_INTERVAL_SECONDS", "")
 	t.Setenv("PORT", "")
 	t.Setenv("TZ", "")
 	t.Setenv("APP_LAUNCH_BASE_URL", "")
@@ -51,9 +49,6 @@ func TestLoadUsesOperationalDefaults(t *testing.T) {
 	if cfg.DatabasePath != "/data/my-movie.sqlite" {
 		t.Fatalf("path=%q", cfg.DatabasePath)
 	}
-	if cfg.PollInterval != 3*time.Minute {
-		t.Fatalf("interval=%s", cfg.PollInterval)
-	}
 	if cfg.Port != 3000 {
 		t.Fatalf("port=%d", cfg.Port)
 	}
@@ -68,16 +63,6 @@ func TestLoadRejectsMissingDiscordToken(t *testing.T) {
 
 	_, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "DISCORD_BOT_TOKEN") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestLoadRejectsInvalidPollingInterval(t *testing.T) {
-	setRequiredEnvironment(t)
-	t.Setenv("POLL_INTERVAL_SECONDS", "0")
-
-	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "POLL_INTERVAL_SECONDS") {
 		t.Fatalf("err=%v", err)
 	}
 }

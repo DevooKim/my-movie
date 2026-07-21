@@ -11,9 +11,9 @@ import (
 
 const (
 	defaultDatabasePath = "/data/my-movie.sqlite"
-	defaultPollSeconds  = 180
 	defaultPort         = 3000
 	defaultTimezone     = "Asia/Seoul"
+	PollInterval        = 3 * time.Minute
 )
 
 type Config struct {
@@ -21,7 +21,6 @@ type Config struct {
 	DiscordApplicationID string
 	DiscordGuildID       string
 	DatabasePath         string
-	PollInterval         time.Duration
 	Port                 int
 	Timezone             string
 	AppLaunchBaseURL     string
@@ -41,10 +40,6 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	pollSeconds, err := positiveInt("POLL_INTERVAL_SECONDS", defaultPollSeconds)
-	if err != nil {
-		return Config{}, err
-	}
 	port, err := positiveInt("PORT", defaultPort)
 	if err != nil || port > 65535 {
 		return Config{}, fmt.Errorf("PORT must be between 1 and 65535")
@@ -59,7 +54,6 @@ func Load() (Config, error) {
 		DiscordApplicationID: applicationID,
 		DiscordGuildID:       guildID,
 		DatabasePath:         valueOrDefault("DATABASE_PATH", defaultDatabasePath),
-		PollInterval:         time.Duration(pollSeconds) * time.Second,
 		Port:                 port,
 		Timezone:             valueOrDefault("TZ", defaultTimezone),
 		AppLaunchBaseURL:     appLaunchBaseURL,
