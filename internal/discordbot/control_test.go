@@ -93,13 +93,14 @@ func TestGuideMessageIncludesPlatformNeutralCopyImageAndJoinButton(t *testing.T)
 	}
 }
 
-func TestViewerRoleMustBeUnmanagedUnprivilegedAndBelowBot(t *testing.T) {
+func TestViewerRoleMustBeUnmanagedUnprivilegedAndNotAboveBot(t *testing.T) {
 	tests := []struct {
 		name string
 		role *discordgo.Role
 		want bool
 	}{
 		{name: "safe", role: &discordgo.Role{ID: "viewer", Position: 1}, want: true},
+		{name: "same position as bot", role: &discordgo.Role{ID: "viewer", Position: 2}, want: true},
 		{name: "administrator", role: &discordgo.Role{ID: "viewer", Position: 1, Permissions: discordgo.PermissionAdministrator}},
 		{name: "managed", role: &discordgo.Role{ID: "viewer", Position: 1, Managed: true}},
 		{name: "above bot", role: &discordgo.Role{ID: "viewer", Position: 3}},

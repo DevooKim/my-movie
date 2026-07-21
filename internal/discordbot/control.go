@@ -124,7 +124,7 @@ func highestRolePosition(roles []*discordgo.Role, roleIDs []string) (int, error)
 }
 
 func isSafeViewerRole(role *discordgo.Role, botRolePosition int) bool {
-	return role != nil && !role.Managed && role.Permissions == 0 && role.Position < botRolePosition
+	return role != nil && !role.Managed && role.Permissions == 0 && role.Position <= botRolePosition
 }
 
 func (m *ChannelManager) EnsurePublicCategory(ctx context.Context, guildID, existingID, name string) (string, bool, error) {
