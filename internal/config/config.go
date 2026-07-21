@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	defaultDatabasePath = "/data/my-movie.sqlite"
-	defaultPort         = 3000
-	defaultTimezone     = "Asia/Seoul"
-	PollInterval        = 3 * time.Minute
+	defaultDatabasePath               = "/data/my-movie.sqlite"
+	defaultPort                       = 3000
+	defaultTimezone                   = "Asia/Seoul"
+	PollInterval                      = 3 * time.Minute
+	defaultHealthcheckIntervalSeconds = 300
 )
 
 type Config struct {
@@ -25,6 +26,7 @@ type Config struct {
 	Timezone             string
 	AppLaunchBaseURL     string
 	HealthcheckPingURL   string
+	HealthcheckInterval  time.Duration
 }
 
 func Load() (Config, error) {
@@ -53,6 +55,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	healthcheckIntervalSeconds, err := positiveInt("HEALTHCHECK_INTERVAL_SECONDS", defaultHealthcheckIntervalSeconds)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		DiscordBotToken:      botToken,
@@ -63,6 +69,7 @@ func Load() (Config, error) {
 		Timezone:             valueOrDefault("TZ", defaultTimezone),
 		AppLaunchBaseURL:     appLaunchBaseURL,
 		HealthcheckPingURL:   healthcheckPingURL,
+		HealthcheckInterval:  time.Duration(healthcheckIntervalSeconds) * time.Second,
 	}, nil
 }
 

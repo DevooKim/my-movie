@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func setRequiredEnvironment(t *testing.T) {
@@ -15,6 +16,7 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("TZ", "")
 	t.Setenv("APP_LAUNCH_BASE_URL", "")
 	t.Setenv("HEALTHCHECK_PING_URL", "")
+	t.Setenv("HEALTHCHECK_INTERVAL_SECONDS", "")
 }
 
 func TestLoadAcceptsHTTPSAppLaunchBaseURL(t *testing.T) {
@@ -55,6 +57,9 @@ func TestLoadUsesOperationalDefaults(t *testing.T) {
 	}
 	if cfg.Timezone != "Asia/Seoul" {
 		t.Fatalf("timezone=%q", cfg.Timezone)
+	}
+	if cfg.HealthcheckInterval != 5*time.Minute {
+		t.Fatalf("healthcheck interval=%s", cfg.HealthcheckInterval)
 	}
 }
 

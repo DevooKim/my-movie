@@ -93,7 +93,7 @@ func New(configuration config.Config) (*App, error) {
 	poller := scheduler.New(repository, notifications, branchProviders, scheduler.Options{Interval: config.PollInterval, Reporter: pollErrors})
 	healthHandler := health.NewHandler(repository, config.PollInterval, time.Now)
 	healthServer := health.NewServer(configuration.Port, healthHandler)
-	heartbeat := health.NewPinger(configuration.HealthcheckPingURL, time.Minute)
+	heartbeat := health.NewPinger(configuration.HealthcheckPingURL, configuration.HealthcheckInterval)
 	return newWithComponents(components{database: db, health: healthServer, discord: bot, scheduler: poller, heartbeat: heartbeat}), nil
 }
 
