@@ -86,8 +86,8 @@ func TestRunOnceRejectsOverlappingCycle(t *testing.T) {
 	}
 }
 
-func TestBurstOffsetsIncludeThreeAdditionalFiveSecondAttempts(t *testing.T) {
-	want := []time.Duration{0, 5 * time.Second, 10 * time.Second, 15 * time.Second}
+func TestBurstOffsetsIncludeThreeAdditionalFifteenSecondAttempts(t *testing.T) {
+	want := []time.Duration{0, 15 * time.Second, 30 * time.Second, 45 * time.Second}
 	got := burstOffsets()
 	if len(got) != len(want) {
 		t.Fatalf("offsets=%v", got)
@@ -101,65 +101,68 @@ func TestBurstOffsetsIncludeThreeAdditionalFiveSecondAttempts(t *testing.T) {
 
 func TestBurstBoundaryUsesOnlyExactCurrentBoundary(t *testing.T) {
 	boundary := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	if got := burstBoundary(boundary, 30*time.Second); !got.Equal(boundary) {
+	if got := burstBoundary(boundary, 3*time.Minute); !got.Equal(boundary) {
 		t.Fatalf("boundary=%s", got)
 	}
-	if got := burstBoundary(boundary.Add(time.Second), 30*time.Second); !got.Equal(boundary) {
+	if got := burstBoundary(boundary.Add(time.Second), 3*time.Minute); !got.Equal(boundary) {
+		t.Fatalf("boundary=%s", got)
+	}
+	if got := burstBoundary(boundary.Add(46*time.Second), 3*time.Minute); !got.Equal(boundary.Add(3 * time.Minute)) {
 		t.Fatalf("boundary=%s", got)
 	}
 }
 
 func TestNextBurstBoundaryWaitsSixMinutesAfterMegaboxFetchFailure(t *testing.T) {
-	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
+	now := time.Date(2026, 7, 20, 12, 0, 46, 0, time.UTC)
 	runErr := providerFetchError{provider: domain.ProviderMegabox, err: errors.New("connection reset by peer")}
-	if got := nextBurstBoundary(now, time.Minute, runErr); !got.Equal(now.Add(6 * time.Minute)) {
+	if got := nextBurstBoundary(now, 3*time.Minute, runErr); !got.Equal(now.Add(6 * time.Minute)) {
 		t.Fatalf("boundary=%s", got)
 	}
 }
 
 func TestNextBurstBoundaryDoesNotBackoffCGVFetchFailure(t *testing.T) {
-	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
+	now := time.Date(2026, 7, 20, 12, 0, 46, 0, time.UTC)
 	runErr := providerFetchError{provider: domain.ProviderCGV, err: errors.New("unexpected EOF")}
-	if got := nextBurstBoundary(now, time.Minute, runErr); !got.Equal(time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)) {
+	if got := nextBurstBoundary(now, 3*time.Minute, runErr); !got.Equal(time.Date(2026, 7, 20, 12, 3, 0, 0, time.UTC)) {
 		t.Fatalf("boundary=%s", got)
 	}
 }
 
 func TestNextBurstBoundaryBacksOffWhenJoinedFailureIncludesMegabox(t *testing.T) {
-	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
+	now := time.Date(2026, 7, 20, 12, 0, 46, 0, time.UTC)
 	runErr := errors.Join(
 		providerFetchError{provider: domain.ProviderCGV, err: errors.New("unexpected EOF")},
 		errors.New("record poll run: database unavailable"),
 		providerFetchError{provider: domain.ProviderMegabox, err: errors.New("connection reset by peer")},
 	)
-	if got := nextBurstBoundary(now, time.Minute, runErr); !got.Equal(now.Add(6 * time.Minute)) {
+	if got := nextBurstBoundary(now, 3*time.Minute, runErr); !got.Equal(now.Add(6 * time.Minute)) {
 		t.Fatalf("boundary=%s", got)
 	}
 }
 
 func TestNextBurstBoundaryDoesNotBackoffJoinedCGVAndInternalFailures(t *testing.T) {
-	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
+	now := time.Date(2026, 7, 20, 12, 0, 46, 0, time.UTC)
 	runErr := errors.Join(
 		providerFetchError{provider: domain.ProviderCGV, err: errors.New("unexpected EOF")},
 		errors.New("record poll run: database unavailable"),
 	)
-	if got := nextBurstBoundary(now, time.Minute, runErr); !got.Equal(time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)) {
+	if got := nextBurstBoundary(now, 3*time.Minute, runErr); !got.Equal(time.Date(2026, 7, 20, 12, 3, 0, 0, time.UTC)) {
 		t.Fatalf("boundary=%s", got)
 	}
 }
 
 func TestNextBurstBoundaryUsesRegularIntervalAfterSuccess(t *testing.T) {
-	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
-	if got := nextBurstBoundary(now, time.Minute, nil); !got.Equal(time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)) {
+	now := time.Date(2026, 7, 20, 12, 0, 46, 0, time.UTC)
+	if got := nextBurstBoundary(now, 3*time.Minute, nil); !got.Equal(time.Date(2026, 7, 20, 12, 3, 0, 0, time.UTC)) {
 		t.Fatalf("boundary=%s", got)
 	}
 }
 
 func TestNextBurstBoundaryDoesNotBackoffNonReportableErrors(t *testing.T) {
-	now := time.Date(2026, 7, 20, 12, 0, 16, 0, time.UTC)
-	want := time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)
+	now := time.Date(2026, 7, 20, 12, 0, 46, 0, time.UTC)
+	want := time.Date(2026, 7, 20, 12, 3, 0, 0, time.UTC)
 	for _, runErr := range []error{ErrCycleRunning, context.Canceled} {
-		if got := nextBurstBoundary(now, time.Minute, runErr); !got.Equal(want) {
+		if got := nextBurstBoundary(now, 3*time.Minute, runErr); !got.Equal(want) {
 			t.Fatalf("error=%v boundary=%s", runErr, got)
 		}
 	}
@@ -192,7 +195,7 @@ func TestRunBurstPreparesCGVAndPollsFourTimesInOneBurst(t *testing.T) {
 	if delivery.calls != 8 {
 		t.Fatalf("delivery calls=%d", delivery.calls)
 	}
-	wantSleeps := []time.Duration{10 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second}
+	wantSleeps := []time.Duration{10 * time.Second, 15 * time.Second, 15 * time.Second, 15 * time.Second}
 	if len(clock.sleeps) != len(wantSleeps) {
 		t.Fatalf("sleeps=%v", clock.sleeps)
 	}
@@ -209,7 +212,7 @@ func TestRunBurstRunsAllAttemptsWhenAnEarlierAttemptIsLate(t *testing.T) {
 	megabox := &fakeProvider{id: domain.ProviderMegabox, afterFetch: func() {
 		if !advanced {
 			advanced = true
-			clock.Advance(6 * time.Second)
+			clock.Advance(16 * time.Second)
 		}
 	}}
 	store := &fakeStore{states: []database.TargetState{{TargetID: "megabox-coex-dolby", Enabled: true}}}

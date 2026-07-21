@@ -18,8 +18,8 @@ var ErrCycleRunning = errors.New("poll cycle is already running")
 
 const (
 	prewarmLead       = 5 * time.Second
-	burstStep         = 5 * time.Second
-	burstWindow       = 15 * time.Second
+	burstStep         = 15 * time.Second
+	burstWindow       = 45 * time.Second
 	burstErrorBackoff = 6 * time.Minute
 )
 
@@ -62,7 +62,7 @@ type Scheduler struct {
 func New(store Store, delivery DeliveryService, providers map[domain.ProviderID]BranchProvider, options Options) *Scheduler {
 	interval := options.Interval
 	if interval == 0 {
-		interval = 5 * time.Minute
+		interval = 3 * time.Minute
 	}
 	sleep := options.Sleep
 	if sleep == nil {

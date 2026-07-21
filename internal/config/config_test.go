@@ -51,7 +51,7 @@ func TestLoadUsesOperationalDefaults(t *testing.T) {
 	if cfg.DatabasePath != "/data/my-movie.sqlite" {
 		t.Fatalf("path=%q", cfg.DatabasePath)
 	}
-	if cfg.PollInterval != time.Minute {
+	if cfg.PollInterval != 3*time.Minute {
 		t.Fatalf("interval=%s", cfg.PollInterval)
 	}
 	if cfg.Port != 3000 {
