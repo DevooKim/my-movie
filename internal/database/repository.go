@@ -47,16 +47,17 @@ type PollAlertState struct {
 }
 
 type Installation struct {
-	GuildID          string
-	OwnerUserID      string
-	ViewerRoleID     string
-	NoticeChannelID  string
-	GuideChannelID   string
-	GuideMessageID   string
-	CategoryID       string
-	ControlChannelID string
-	ControlMessageID string
-	StatusChannelID  string
+	GuildID             string
+	OwnerUserID         string
+	ViewerRoleID        string
+	NoticeChannelID     string
+	GuideChannelID      string
+	GuideImageMessageID string
+	GuideMessageID      string
+	CategoryID          string
+	ControlChannelID    string
+	ControlMessageID    string
+	StatusChannelID     string
 }
 
 type TargetState struct {
@@ -92,13 +93,14 @@ func NewRepository(database *sql.DB, now func() time.Time) *Repository {
 
 func (r *Repository) SaveInstallation(ctx context.Context, installation Installation) error {
 	_, err := r.database.ExecContext(ctx, `
-		INSERT INTO installations(guild_id, owner_user_id, viewer_role_id, notice_channel_id, guide_channel_id, guide_message_id, category_id, control_channel_id, control_message_id, status_channel_id, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO installations(guild_id, owner_user_id, viewer_role_id, notice_channel_id, guide_channel_id, guide_image_message_id, guide_message_id, category_id, control_channel_id, control_message_id, status_channel_id, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(guild_id) DO UPDATE SET
 		  owner_user_id=excluded.owner_user_id,
 		  viewer_role_id=excluded.viewer_role_id,
 		  notice_channel_id=excluded.notice_channel_id,
 		  guide_channel_id=excluded.guide_channel_id,
+		  guide_image_message_id=excluded.guide_image_message_id,
 		  guide_message_id=excluded.guide_message_id,
 		  category_id=excluded.category_id,
 		  control_channel_id=excluded.control_channel_id,
@@ -106,7 +108,7 @@ func (r *Repository) SaveInstallation(ctx context.Context, installation Installa
 		  status_channel_id=excluded.status_channel_id,
 		  updated_at=excluded.updated_at`,
 		installation.GuildID, installation.OwnerUserID, installation.ViewerRoleID,
-		installation.NoticeChannelID, installation.GuideChannelID, installation.GuideMessageID, installation.CategoryID,
+		installation.NoticeChannelID, installation.GuideChannelID, installation.GuideImageMessageID, installation.GuideMessageID, installation.CategoryID,
 		installation.ControlChannelID, installation.ControlMessageID, installation.StatusChannelID, formatTime(r.now()),
 	)
 	return err
@@ -115,10 +117,10 @@ func (r *Repository) SaveInstallation(ctx context.Context, installation Installa
 func (r *Repository) GetInstallation(ctx context.Context) (Installation, error) {
 	var installation Installation
 	err := r.database.QueryRowContext(ctx, `
-		SELECT guild_id, owner_user_id, viewer_role_id, notice_channel_id, guide_channel_id, guide_message_id, category_id, control_channel_id, control_message_id, status_channel_id
+		SELECT guild_id, owner_user_id, viewer_role_id, notice_channel_id, guide_channel_id, guide_image_message_id, guide_message_id, category_id, control_channel_id, control_message_id, status_channel_id
 		FROM installations ORDER BY updated_at DESC LIMIT 1`).Scan(
 		&installation.GuildID, &installation.OwnerUserID, &installation.ViewerRoleID,
-		&installation.NoticeChannelID, &installation.GuideChannelID, &installation.GuideMessageID, &installation.CategoryID,
+		&installation.NoticeChannelID, &installation.GuideChannelID, &installation.GuideImageMessageID, &installation.GuideMessageID, &installation.CategoryID,
 		&installation.ControlChannelID, &installation.ControlMessageID, &installation.StatusChannelID,
 	)
 	return installation, err

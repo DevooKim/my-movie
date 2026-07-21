@@ -34,13 +34,16 @@ func TestInitializeCreatesRoleGatedAlertChannelsAndOnboarding(t *testing.T) {
 	if !reflect.DeepEqual(channels.restrictedTextNames, wantRestrictedNames) {
 		t.Fatalf("restricted channels=%v want=%v", channels.restrictedTextNames, wantRestrictedNames)
 	}
-	if installation.OwnerUserID != "owner" || installation.ViewerRoleID == "" || installation.NoticeChannelID == "" || installation.GuideChannelID == "" || installation.GuideMessageID == "" || installation.ControlMessageID == "" || installation.StatusChannelID == "" {
+	if installation.OwnerUserID != "owner" || installation.ViewerRoleID == "" || installation.NoticeChannelID == "" || installation.GuideChannelID == "" || installation.GuideImageMessageID == "" || installation.GuideMessageID == "" || installation.ControlMessageID == "" || installation.StatusChannelID == "" {
 		t.Fatalf("installation=%+v", installation)
 	}
 	if len(channels.guides) != 1 || channels.guides[0] != installation.GuideChannelID {
 		t.Fatalf("guides=%v installation=%+v", channels.guides, installation)
 	}
-	if len(store.installationSaves) < 7 || store.installationSaves[0].ViewerRoleID == "" || store.installationSaves[1].NoticeChannelID == "" || store.installationSaves[2].GuideChannelID == "" || store.installationSaves[3].GuideMessageID == "" || store.installationSaves[4].CategoryID == "" || store.installationSaves[5].ControlChannelID == "" {
+	if len(channels.guideImages) != 1 || channels.guideImages[0] != installation.GuideChannelID {
+		t.Fatalf("guide images=%v installation=%+v", channels.guideImages, installation)
+	}
+	if len(store.installationSaves) < 8 || store.installationSaves[0].ViewerRoleID == "" || store.installationSaves[1].NoticeChannelID == "" || store.installationSaves[2].GuideChannelID == "" || store.installationSaves[3].GuideImageMessageID == "" || store.installationSaves[4].GuideMessageID == "" || store.installationSaves[5].CategoryID == "" || store.installationSaves[6].ControlChannelID == "" {
 		t.Fatalf("incremental saves=%+v", store.installationSaves)
 	}
 	if len(store.states) != 5 {
@@ -53,6 +56,33 @@ func TestInitializeCreatesRoleGatedAlertChannelsAndOnboarding(t *testing.T) {
 	}
 	if len(channels.panels) != 1 || len(channels.panels[0].Targets) != 5 {
 		t.Fatalf("panels=%+v", channels.panels)
+	}
+}
+
+func TestInitializeMigratesLegacyGuideToImageFirstOrder(t *testing.T) {
+	store := newFakeStore()
+	store.installation = &database.Installation{
+		GuildID: "guild", OwnerUserID: "owner", ViewerRoleID: "viewer", NoticeChannelID: "notice",
+		GuideChannelID: "guide-channel", GuideMessageID: "100", CategoryID: "category",
+		ControlChannelID: "control", ControlMessageID: "panel", StatusChannelID: "status",
+	}
+	channels := &fakeChannels{}
+	installation, err := New(store, channels, nil).Initialize(context.Background(), "guild", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installation.GuideImageMessageID == "" || installation.GuideMessageID == "" || installation.GuideMessageID == "100" {
+		t.Fatalf("installation=%+v", installation)
+	}
+	wantOrder := []string{"guide-image", "delete-guide", "guide"}
+	var gotOrder []string
+	for _, call := range channels.callOrder {
+		if call == "guide-image" || call == "delete-guide" || call == "guide" {
+			gotOrder = append(gotOrder, call)
+		}
+	}
+	if !reflect.DeepEqual(gotOrder, wantOrder) {
+		t.Fatalf("guide order=%v want=%v; all calls=%v", gotOrder, wantOrder, channels.callOrder)
 	}
 }
 
@@ -268,6 +298,7 @@ type fakeChannels struct {
 	createdIDs          []string
 	panels              []Panel
 	guides              []string
+	guideImages         []string
 	roleAssignments     [][3]string
 	announcements       [][2]string
 	deletedRoles        []string
@@ -358,12 +389,25 @@ func (c *fakeChannels) UpsertPanel(_ context.Context, _ string, existingID strin
 	}
 	return "panel", true, nil
 }
-func (c *fakeChannels) UpsertGuide(_ context.Context, channelID, existingID string) (string, bool, error) {
+func (c *fakeChannels) UpsertGuide(_ context.Context, channelID, existingID, imageMessageID string) (string, bool, error) {
+	if existingID == "100" && imageMessageID == "200" {
+		c.callOrder = append(c.callOrder, "delete-guide")
+		existingID = ""
+	}
+	c.callOrder = append(c.callOrder, "guide")
 	c.guides = append(c.guides, channelID)
 	if existingID != "" {
 		return existingID, false, nil
 	}
 	return "guide-message", true, nil
+}
+func (c *fakeChannels) UpsertGuideImage(_ context.Context, channelID, existingID string) (string, bool, error) {
+	c.callOrder = append(c.callOrder, "guide-image")
+	c.guideImages = append(c.guideImages, channelID)
+	if existingID != "" {
+		return existingID, false, nil
+	}
+	return "200", true, nil
 }
 func (c *fakeChannels) AddMemberRole(_ context.Context, guildID, userID, roleID string) error {
 	c.roleAssignments = append(c.roleAssignments, [3]string{guildID, userID, roleID})

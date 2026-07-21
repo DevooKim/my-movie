@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -222,21 +223,26 @@ func (m *ChannelManager) UpsertPanel(ctx context.Context, channelID, existingID 
 	return created.ID, true, nil
 }
 
-func (m *ChannelManager) UpsertGuide(ctx context.Context, channelID, existingID string) (string, bool, error) {
+func (m *ChannelManager) UpsertGuide(ctx context.Context, channelID, existingID, imageMessageID string) (string, bool, error) {
 	message := guideMessage()
-	if existingID == "" {
-		messages, err := m.session.ChannelMessages(channelID, 100, "", "", "", discordgo.WithContext(ctx))
-		if err != nil {
+	messages, err := m.session.ChannelMessages(channelID, 100, "", "", "", discordgo.WithContext(ctx))
+	if err != nil {
+		return "", false, err
+	}
+	recovered := findGuideMessageAfterImage(messages, m.botID(), imageMessageID)
+	if existingID == "" && recovered != nil {
+		existingID = recovered.ID
+	}
+	if existingID != "" && messagePredates(existingID, imageMessageID) {
+		if err := m.DeleteMessage(ctx, channelID, existingID); err != nil {
 			return "", false, err
 		}
-		for _, candidate := range messages {
-			if isGuideMessage(candidate, m.botID()) {
-				existingID = candidate.ID
-				break
-			}
+		existingID = ""
+		if recovered != nil {
+			existingID = recovered.ID
 		}
 	}
-	if existingID != "" {
+	for existingID != "" {
 		components := message.Components
 		embeds := []*discordgo.MessageEmbed{}
 		attachments := []*discordgo.MessageAttachment{}
@@ -248,13 +254,92 @@ func (m *ChannelManager) UpsertGuide(ctx context.Context, channelID, existingID 
 		} else if !isUnknownMessage(err) {
 			return "", false, err
 		}
-		message = guideMessage()
+		if fallback := fallbackMessageID(existingID, recovered); fallback != "" {
+			existingID = fallback
+			recovered = nil
+			continue
+		}
+		existingID = ""
 	}
+	message = guideMessage()
 	created, err := m.session.ChannelMessageSendComplex(channelID, message, discordgo.WithContext(ctx))
 	if err != nil {
 		return "", false, err
 	}
 	return created.ID, true, nil
+}
+
+func findGuideMessageAfterImage(messages []*discordgo.Message, botID, imageMessageID string) *discordgo.Message {
+	for _, message := range messages {
+		if isGuideMessage(message, botID) && !messagePredates(message.ID, imageMessageID) {
+			return message
+		}
+	}
+	return nil
+}
+
+func (m *ChannelManager) UpsertGuideImage(ctx context.Context, channelID, existingID string) (string, bool, error) {
+	message := guideImageMessage()
+	messages, err := m.session.ChannelMessages(channelID, 100, "", "", "", discordgo.WithContext(ctx))
+	if err != nil {
+		return "", false, err
+	}
+	recovered := findGuideImageMessage(messages, m.botID())
+	if existingID == "" && recovered != nil {
+		existingID = recovered.ID
+	}
+	for existingID != "" {
+		message = guideImageMessage()
+		components := []discordgo.MessageComponent{}
+		embeds := []*discordgo.MessageEmbed{}
+		attachments := []*discordgo.MessageAttachment{}
+		content := ""
+		if _, err := m.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
+			ID: existingID, Channel: channelID, Content: &content, Components: &components,
+			Embeds: &embeds, AllowedMentions: message.AllowedMentions, Files: message.Files, Attachments: &attachments,
+		}, discordgo.WithContext(ctx)); err == nil {
+			return existingID, false, nil
+		} else if !isUnknownMessage(err) {
+			return "", false, err
+		}
+		if fallback := fallbackMessageID(existingID, recovered); fallback != "" {
+			existingID = fallback
+			recovered = nil
+			continue
+		}
+		existingID = ""
+	}
+	message = guideImageMessage()
+	created, err := m.session.ChannelMessageSendComplex(channelID, message, discordgo.WithContext(ctx))
+	if err != nil {
+		return "", false, err
+	}
+	return created.ID, true, nil
+}
+
+func fallbackMessageID(failedID string, recovered *discordgo.Message) string {
+	if recovered == nil || recovered.ID == failedID {
+		return ""
+	}
+	return recovered.ID
+}
+
+func findGuideImageMessage(messages []*discordgo.Message, botID string) *discordgo.Message {
+	for _, message := range messages {
+		if message == nil || message.Author == nil || message.Author.ID != botID || message.Content != "" || len(message.Components) != 0 || len(message.Embeds) != 0 || len(message.Attachments) != 1 {
+			continue
+		}
+		if message.Attachments[0].Filename == "my-movie-pepe.png" {
+			return message
+		}
+	}
+	return nil
+}
+
+func messagePredates(messageID, referenceID string) bool {
+	message, messageErr := strconv.ParseUint(messageID, 10, 64)
+	reference, referenceErr := strconv.ParseUint(referenceID, 10, 64)
+	return messageErr == nil && referenceErr == nil && message < reference
 }
 
 func isGuideMessage(message *discordgo.Message, botID string) bool {
@@ -324,7 +409,11 @@ func (m *ChannelManager) DeleteChannel(ctx context.Context, channelID string) er
 }
 
 func (m *ChannelManager) DeleteMessage(ctx context.Context, channelID, messageID string) error {
-	return m.session.ChannelMessageDelete(channelID, messageID, discordgo.WithContext(ctx))
+	err := m.session.ChannelMessageDelete(channelID, messageID, discordgo.WithContext(ctx))
+	if isUnknownMessage(err) {
+		return nil
+	}
+	return err
 }
 
 func (m *ChannelManager) SendAnnouncement(ctx context.Context, channelID, content string) error {
@@ -436,6 +525,12 @@ CGV
 		Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 			discordgo.Button{Label: "🔔 알림 채널 보기", Style: discordgo.PrimaryButton, CustomID: "alerts:join"},
 		}}},
+		AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}},
+	}
+}
+
+func guideImageMessage() *discordgo.MessageSend {
+	return &discordgo.MessageSend{
 		Files:           []*discordgo.File{{Name: "my-movie-pepe.png", ContentType: "image/png", Reader: bytes.NewReader(guideImage)}},
 		AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}},
 	}

@@ -32,7 +32,8 @@ type Channels interface {
 	EnsurePrivateTextChannel(context.Context, string, string, string, string, string) (string, bool, error)
 	EnsurePublicTextChannel(context.Context, string, string, string, string) (string, bool, error)
 	EnsureRestrictedTextChannel(context.Context, string, string, string, string, string) (string, bool, error)
-	UpsertGuide(context.Context, string, string) (string, bool, error)
+	UpsertGuideImage(context.Context, string, string) (string, bool, error)
+	UpsertGuide(context.Context, string, string, string) (string, bool, error)
 	UpsertPanel(context.Context, string, string, Panel) (string, bool, error)
 	AddMemberRole(context.Context, string, string, string) error
 	SendAnnouncement(context.Context, string, string) error
@@ -130,8 +131,21 @@ func (s *Service) Initialize(ctx context.Context, guildID, ownerID string) (data
 		}
 		return database.Installation{}, err
 	}
+	previousGuideImageMessageID := installation.GuideImageMessageID
+	installation.GuideImageMessageID, created, err = s.channels.UpsertGuideImage(ctx, installation.GuideChannelID, previousGuideImageMessageID)
+	if err != nil {
+		return database.Installation{}, fmt.Errorf("upsert guide image message: %w", err)
+	}
+	if err := s.store.SaveInstallation(ctx, installation); err != nil {
+		if created {
+			err = cleanupFailure(ctx, err, func(cleanupCtx context.Context) error {
+				return s.channels.DeleteMessage(cleanupCtx, installation.GuideChannelID, installation.GuideImageMessageID)
+			})
+		}
+		return database.Installation{}, err
+	}
 	previousGuideMessageID := installation.GuideMessageID
-	installation.GuideMessageID, created, err = s.channels.UpsertGuide(ctx, installation.GuideChannelID, previousGuideMessageID)
+	installation.GuideMessageID, created, err = s.channels.UpsertGuide(ctx, installation.GuideChannelID, previousGuideMessageID, installation.GuideImageMessageID)
 	if err != nil {
 		return database.Installation{}, fmt.Errorf("upsert guide message: %w", err)
 	}

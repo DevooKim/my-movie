@@ -39,6 +39,7 @@ func TestInstallationAndTargetStatePersistAcrossReopen(t *testing.T) {
 		GuildID: "g1", OwnerUserID: "u1", CategoryID: "cat",
 		ControlChannelID: "control", ControlMessageID: "message", StatusChannelID: "status",
 		ViewerRoleID: "viewer", NoticeChannelID: "notice", GuideChannelID: "guide", GuideMessageID: "guide-message",
+		GuideImageMessageID: "guide-image-message",
 	}
 	if err := repository.SaveInstallation(ctx, installation); err != nil {
 		t.Fatal(err)
@@ -341,7 +342,7 @@ func TestMigrationThreePreservesDisabledLegacyRows(t *testing.T) {
 		t.Fatalf("legacy status=%q", status)
 	}
 	var version int
-	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 8 {
+	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 9 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 }

@@ -79,12 +79,19 @@ func TestRestrictedOverwritesExposeReadOnlyChannelsOnlyToViewerRole(t *testing.T
 	}
 }
 
-func TestGuideMessageIncludesPlatformNeutralCopyImageAndJoinButton(t *testing.T) {
+func TestGuideImageMessageContainsOnlyImage(t *testing.T) {
+	message := guideImageMessage()
+	if message.Content != "" || len(message.Components) != 0 || len(message.Files) != 1 || message.Files[0].Name != "my-movie-pepe.png" {
+		t.Fatalf("message=%+v", message)
+	}
+}
+
+func TestGuideMessageIncludesPlatformNeutralCopyAndJoinButton(t *testing.T) {
 	message := guideMessage()
 	if strings.Contains(strings.ToLower(message.Content), "iphone") || strings.Contains(message.Content, "아이폰") {
 		t.Fatalf("platform-specific content=%q", message.Content)
 	}
-	if !strings.Contains(message.Content, "CGV와 메가박스") || len(message.Files) != 1 || message.Files[0].Name != "my-movie-pepe.png" {
+	if !strings.Contains(message.Content, "CGV와 메가박스") || len(message.Files) != 0 {
 		t.Fatalf("message=%+v", message)
 	}
 	button := message.Components[0].(discordgo.ActionsRow).Components[0].(discordgo.Button)
@@ -124,6 +131,48 @@ func TestGuideMessageCanBeRecoveredOnlyFromBotAuthoredJoinButton(t *testing.T) {
 	guide.Author.ID = "member"
 	if isGuideMessage(guide, "bot") {
 		t.Fatal("member-authored message was accepted")
+	}
+}
+
+func TestGuideImageMessageCanBeRecoveredOnlyFromBotAuthoredImageOnlyMessage(t *testing.T) {
+	messages := []*discordgo.Message{
+		{ID: "combined", Author: &discordgo.User{ID: "bot"}, Content: "안내", Attachments: []*discordgo.MessageAttachment{{Filename: "my-movie-pepe.png"}}},
+		{ID: "member-image", Author: &discordgo.User{ID: "member"}, Attachments: []*discordgo.MessageAttachment{{Filename: "my-movie-pepe.png"}}},
+		{ID: "image", Author: &discordgo.User{ID: "bot"}, Attachments: []*discordgo.MessageAttachment{{Filename: "my-movie-pepe.png"}}},
+	}
+	if got := findGuideImageMessage(messages, "bot"); got == nil || got.ID != "image" {
+		t.Fatalf("image=%+v", got)
+	}
+}
+
+func TestFallbackMessageIDUsesRecoveredCandidateAfterStoredIDFails(t *testing.T) {
+	recovered := &discordgo.Message{ID: "200"}
+	if got := fallbackMessageID("100", recovered); got != "200" {
+		t.Fatalf("fallback=%q", got)
+	}
+	if got := fallbackMessageID("200", recovered); got != "" {
+		t.Fatalf("same failed candidate should not retry: %q", got)
+	}
+}
+
+func TestMessagePredatesUsesDiscordSnowflakeOrder(t *testing.T) {
+	if !messagePredates("100", "200") {
+		t.Fatal("message 100 should predate message 200")
+	}
+	if messagePredates("200", "100") || messagePredates("invalid", "200") {
+		t.Fatal("newer or invalid message ID should not predate image")
+	}
+}
+
+func TestFindGuideMessageAfterImageRecoversUnpersistedReplacement(t *testing.T) {
+	guide := func(id string) *discordgo.Message {
+		return &discordgo.Message{ID: id, Author: &discordgo.User{ID: "bot"}, Components: []discordgo.MessageComponent{
+			discordgo.ActionsRow{Components: []discordgo.MessageComponent{discordgo.Button{CustomID: "alerts:join"}}},
+		}}
+	}
+	messages := []*discordgo.Message{guide("300"), guide("100")}
+	if got := findGuideMessageAfterImage(messages, "bot", "200"); got == nil || got.ID != "300" {
+		t.Fatalf("guide=%+v", got)
 	}
 }
 
