@@ -66,7 +66,7 @@ func TestPublicOverwritesAllowReadingAndReactionsButDenyWriting(t *testing.T) {
 		t.Fatalf("everyone=%+v", everyone)
 	}
 	bot := overwrites[1]
-	botAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory | discordgo.PermissionSendMessages | discordgo.PermissionManageChannels)
+	botAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory | discordgo.PermissionSendMessages | discordgo.PermissionManageChannels | discordgo.PermissionCreatePublicThreads | discordgo.PermissionCreatePrivateThreads | discordgo.PermissionSendMessagesInThreads)
 	if bot.ID != "bot" || bot.Type != discordgo.PermissionOverwriteTypeMember || bot.Allow&botAllow != botAllow {
 		t.Fatalf("bot=%+v", bot)
 	}

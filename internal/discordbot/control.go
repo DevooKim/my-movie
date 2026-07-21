@@ -148,7 +148,7 @@ func privateOverwrites(guildID, ownerID, botID string) []*discordgo.PermissionOv
 func publicOverwrites(guildID, botID string) []*discordgo.PermissionOverwrite {
 	memberAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory | discordgo.PermissionAddReactions)
 	memberDeny := int64(discordgo.PermissionSendMessages | discordgo.PermissionCreatePublicThreads | discordgo.PermissionCreatePrivateThreads | discordgo.PermissionSendMessagesInThreads)
-	botAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory | discordgo.PermissionSendMessages | discordgo.PermissionAddReactions | discordgo.PermissionManageChannels)
+	botAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory | discordgo.PermissionSendMessages | discordgo.PermissionAddReactions | discordgo.PermissionManageChannels | discordgo.PermissionCreatePublicThreads | discordgo.PermissionCreatePrivateThreads | discordgo.PermissionSendMessagesInThreads)
 	return []*discordgo.PermissionOverwrite{
 		{ID: guildID, Type: discordgo.PermissionOverwriteTypeRole, Allow: memberAllow, Deny: memberDeny},
 		{ID: botID, Type: discordgo.PermissionOverwriteTypeMember, Allow: botAllow},
