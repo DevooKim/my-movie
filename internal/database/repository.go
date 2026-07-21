@@ -37,11 +37,13 @@ type PollRun struct {
 }
 
 type PollAlertState struct {
-	Provider     domain.ProviderID
-	TheaterID    string
-	Failed       bool
-	ErrorSummary string
-	UpdatedAt    time.Time
+	Provider         domain.ProviderID
+	TheaterID        string
+	Failed           bool
+	ErrorSummary     string
+	ControlDelivered bool
+	StatusDelivered  bool
+	UpdatedAt        time.Time
 }
 
 type Installation struct {
@@ -50,6 +52,7 @@ type Installation struct {
 	CategoryID       string
 	ControlChannelID string
 	ControlMessageID string
+	StatusChannelID  string
 }
 
 type TargetState struct {
@@ -85,16 +88,17 @@ func NewRepository(database *sql.DB, now func() time.Time) *Repository {
 
 func (r *Repository) SaveInstallation(ctx context.Context, installation Installation) error {
 	_, err := r.database.ExecContext(ctx, `
-		INSERT INTO installations(guild_id, owner_user_id, category_id, control_channel_id, control_message_id, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?)
+		INSERT INTO installations(guild_id, owner_user_id, category_id, control_channel_id, control_message_id, status_channel_id, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(guild_id) DO UPDATE SET
 		  owner_user_id=excluded.owner_user_id,
 		  category_id=excluded.category_id,
 		  control_channel_id=excluded.control_channel_id,
 		  control_message_id=excluded.control_message_id,
+		  status_channel_id=excluded.status_channel_id,
 		  updated_at=excluded.updated_at`,
 		installation.GuildID, installation.OwnerUserID, installation.CategoryID,
-		installation.ControlChannelID, installation.ControlMessageID, formatTime(r.now()),
+		installation.ControlChannelID, installation.ControlMessageID, installation.StatusChannelID, formatTime(r.now()),
 	)
 	return err
 }
@@ -102,10 +106,10 @@ func (r *Repository) SaveInstallation(ctx context.Context, installation Installa
 func (r *Repository) GetInstallation(ctx context.Context) (Installation, error) {
 	var installation Installation
 	err := r.database.QueryRowContext(ctx, `
-		SELECT guild_id, owner_user_id, category_id, control_channel_id, control_message_id
+		SELECT guild_id, owner_user_id, category_id, control_channel_id, control_message_id, status_channel_id
 		FROM installations ORDER BY updated_at DESC LIMIT 1`).Scan(
 		&installation.GuildID, &installation.OwnerUserID, &installation.CategoryID,
-		&installation.ControlChannelID, &installation.ControlMessageID,
+		&installation.ControlChannelID, &installation.ControlMessageID, &installation.StatusChannelID,
 	)
 	return installation, err
 }
@@ -114,9 +118,9 @@ func (r *Repository) GetPollAlertState(ctx context.Context, provider domain.Prov
 	var state PollAlertState
 	var updatedAt string
 	err := r.database.QueryRowContext(ctx, `
-		SELECT provider, theater_id, failed, error_summary, updated_at
+		SELECT provider, theater_id, failed, error_summary, control_delivered, status_delivered, updated_at
 		FROM poll_alert_states WHERE provider = ? AND theater_id = ?`, provider, theaterID,
-	).Scan(&state.Provider, &state.TheaterID, &state.Failed, &state.ErrorSummary, &updatedAt)
+	).Scan(&state.Provider, &state.TheaterID, &state.Failed, &state.ErrorSummary, &state.ControlDelivered, &state.StatusDelivered, &updatedAt)
 	if err != nil {
 		return PollAlertState{}, err
 	}
@@ -126,11 +130,16 @@ func (r *Repository) GetPollAlertState(ctx context.Context, provider domain.Prov
 
 func (r *Repository) SavePollAlertState(ctx context.Context, state PollAlertState) error {
 	_, err := r.database.ExecContext(ctx, `
-		INSERT INTO poll_alert_states(provider, theater_id, failed, error_summary, updated_at)
-		VALUES(?, ?, ?, ?, ?)
+		INSERT INTO poll_alert_states(provider, theater_id, failed, error_summary, control_delivered, status_delivered, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(provider, theater_id) DO UPDATE SET
-		  failed=excluded.failed, error_summary=excluded.error_summary, updated_at=excluded.updated_at`,
-		state.Provider, state.TheaterID, state.Failed, state.ErrorSummary, formatTime(r.now()))
+		  failed=excluded.failed,
+		  error_summary=excluded.error_summary,
+		  control_delivered=excluded.control_delivered,
+		  status_delivered=excluded.status_delivered,
+		  updated_at=excluded.updated_at`,
+		state.Provider, state.TheaterID, state.Failed, state.ErrorSummary,
+		state.ControlDelivered, state.StatusDelivered, formatTime(r.now()))
 	return err
 }
 

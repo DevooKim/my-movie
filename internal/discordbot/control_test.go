@@ -44,13 +44,31 @@ func TestPrivateOverwritesHideChannelsFromEveryone(t *testing.T) {
 	if len(overwrites) != 3 {
 		t.Fatalf("overwrites=%+v", overwrites)
 	}
-	if overwrites[0].ID != "guild" || overwrites[0].Type != discordgo.PermissionOverwriteTypeRole || overwrites[0].Deny&discordgo.PermissionViewChannel == 0 {
+	if overwrites[0].ID != "guild" || overwrites[0].Type != discordgo.PermissionOverwriteTypeRole || overwrites[0].Deny&discordgo.PermissionViewChannel == 0 || overwrites[0].Deny&discordgo.PermissionSendMessages == 0 {
 		t.Fatalf("everyone=%+v", overwrites[0])
 	}
 	for _, overwrite := range overwrites[1:] {
 		if overwrite.Type != discordgo.PermissionOverwriteTypeMember || overwrite.Allow&discordgo.PermissionViewChannel == 0 || overwrite.Allow&discordgo.PermissionSendMessages == 0 {
 			t.Fatalf("member=%+v", overwrite)
 		}
+	}
+}
+
+func TestPublicOverwritesAllowReadingAndReactionsButDenyWriting(t *testing.T) {
+	overwrites := publicOverwrites("guild", "bot")
+	if len(overwrites) != 2 {
+		t.Fatalf("overwrites=%+v", overwrites)
+	}
+	everyone := overwrites[0]
+	memberAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory | discordgo.PermissionAddReactions)
+	memberDeny := int64(discordgo.PermissionSendMessages | discordgo.PermissionCreatePublicThreads | discordgo.PermissionCreatePrivateThreads | discordgo.PermissionSendMessagesInThreads)
+	if everyone.ID != "guild" || everyone.Type != discordgo.PermissionOverwriteTypeRole || everyone.Allow&memberAllow != memberAllow || everyone.Deny&memberDeny != memberDeny {
+		t.Fatalf("everyone=%+v", everyone)
+	}
+	bot := overwrites[1]
+	botAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory | discordgo.PermissionSendMessages | discordgo.PermissionManageChannels)
+	if bot.ID != "bot" || bot.Type != discordgo.PermissionOverwriteTypeMember || bot.Allow&botAllow != botAllow {
+		t.Fatalf("bot=%+v", bot)
 	}
 }
 

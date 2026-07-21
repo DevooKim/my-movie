@@ -37,7 +37,7 @@ func TestInstallationAndTargetStatePersistAcrossReopen(t *testing.T) {
 	repository := NewRepository(db, func() time.Time { return fixedNow })
 	installation := Installation{
 		GuildID: "g1", OwnerUserID: "u1", CategoryID: "cat",
-		ControlChannelID: "control", ControlMessageID: "message",
+		ControlChannelID: "control", ControlMessageID: "message", StatusChannelID: "status",
 	}
 	if err := repository.SaveInstallation(ctx, installation); err != nil {
 		t.Fatal(err)
@@ -68,6 +68,72 @@ func TestInstallationAndTargetStatePersistAcrossReopen(t *testing.T) {
 	}
 	if len(states) != 1 || states[0].TargetID != "cgv-yongsan-imax" || !states[0].Enabled {
 		t.Fatalf("states=%+v", states)
+	}
+}
+
+func TestPollAlertDeliveryFlagsPersist(t *testing.T) {
+	repository, closeDatabase := newTestRepository(t)
+	defer closeDatabase()
+	ctx := context.Background()
+	want := PollAlertState{
+		Provider: domain.ProviderCGV, TheaterID: "0013", Failed: true,
+		ErrorSummary: "upstream failed", ControlDelivered: true, StatusDelivered: false,
+	}
+	if err := repository.SavePollAlertState(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repository.GetPollAlertState(ctx, want.Provider, want.TheaterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Provider != want.Provider || got.TheaterID != want.TheaterID || got.Failed != want.Failed || got.ErrorSummary != want.ErrorSummary || got.ControlDelivered != want.ControlDelivered || got.StatusDelivered != want.StatusDelivered {
+		t.Fatalf("state=%+v want=%+v", got, want)
+	}
+}
+
+func TestMigrationSevenRetriesPublicDeliveryForExistingFailure(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "version-six.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 6; version++ {
+		name := map[int]string{
+			1: "001_initial.sql", 2: "002_fixed_targets.sql", 3: "003_channel_targets.sql",
+			4: "004_target_generations.sql", 5: "005_poll_alert_states.sql", 6: "006_status_channel.sql",
+		}[version]
+		migration, err := migrationFiles.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, string(migration)); err != nil {
+			t.Fatalf("migration %d: %v", version, err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations VALUES(?, datetime('now'))`, version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO poll_alert_states(provider, theater_id, failed, error_summary, updated_at)
+		VALUES('cgv', '0013', 1, 'upstream failed', datetime('now'))`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var controlDelivered, statusDelivered bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT control_delivered, status_delivered
+		FROM poll_alert_states WHERE provider='cgv' AND theater_id='0013'`,
+	).Scan(&controlDelivered, &statusDelivered); err != nil {
+		t.Fatal(err)
+	}
+	if !controlDelivered || statusDelivered {
+		t.Fatalf("control_delivered=%v status_delivered=%v", controlDelivered, statusDelivered)
 	}
 }
 
@@ -274,7 +340,7 @@ func TestMigrationThreePreservesDisabledLegacyRows(t *testing.T) {
 		t.Fatalf("legacy status=%q", status)
 	}
 	var version int
-	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
+	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 }

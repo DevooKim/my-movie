@@ -25,8 +25,9 @@ type Store interface {
 }
 
 type Channels interface {
-	EnsurePrivateCategory(context.Context, string, string, string, string) (string, error)
+	EnsurePublicCategory(context.Context, string, string, string) (string, error)
 	EnsurePrivateTextChannel(context.Context, string, string, string, string, string) (string, error)
+	EnsurePublicTextChannel(context.Context, string, string, string, string) (string, error)
 	UpsertPanel(context.Context, string, string, Panel) (string, error)
 }
 
@@ -70,13 +71,28 @@ func (s *Service) Initialize(ctx context.Context, guildID, ownerID string) (data
 	}
 	installation.GuildID = guildID
 	installation.OwnerUserID = ownerID
-	installation.CategoryID, err = s.channels.EnsurePrivateCategory(ctx, guildID, installation.CategoryID, categoryName, ownerID)
+	previousCategoryID := installation.CategoryID
+	controlSecured := false
+	if previousCategoryID != "" && installation.ControlChannelID != "" {
+		installation.ControlChannelID, err = s.channels.EnsurePrivateTextChannel(ctx, guildID, previousCategoryID, installation.ControlChannelID, "제어", ownerID)
+		if err != nil {
+			return database.Installation{}, fmt.Errorf("secure control channel before publishing category: %w", err)
+		}
+		controlSecured = true
+	}
+	installation.CategoryID, err = s.channels.EnsurePublicCategory(ctx, guildID, installation.CategoryID, categoryName)
 	if err != nil {
 		return database.Installation{}, fmt.Errorf("ensure alert category: %w", err)
 	}
-	installation.ControlChannelID, err = s.channels.EnsurePrivateTextChannel(ctx, guildID, installation.CategoryID, installation.ControlChannelID, "제어", ownerID)
+	if !controlSecured || installation.CategoryID != previousCategoryID {
+		installation.ControlChannelID, err = s.channels.EnsurePrivateTextChannel(ctx, guildID, installation.CategoryID, installation.ControlChannelID, "제어", ownerID)
+		if err != nil {
+			return database.Installation{}, fmt.Errorf("ensure control channel: %w", err)
+		}
+	}
+	installation.StatusChannelID, err = s.channels.EnsurePublicTextChannel(ctx, guildID, installation.CategoryID, installation.StatusChannelID, "서버-상태")
 	if err != nil {
-		return database.Installation{}, fmt.Errorf("ensure control channel: %w", err)
+		return database.Installation{}, fmt.Errorf("ensure status channel: %w", err)
 	}
 
 	states, err := s.store.ListTargetStates(ctx)
@@ -90,7 +106,7 @@ func (s *Service) Initialize(ctx context.Context, guildID, ownerID string) (data
 	for _, target := range targets.All() {
 		state := byID[target.ID]
 		state.TargetID = target.ID
-		state.ChannelID, err = s.channels.EnsurePrivateTextChannel(ctx, guildID, installation.CategoryID, state.ChannelID, channelName(target.ID), ownerID)
+		state.ChannelID, err = s.channels.EnsurePublicTextChannel(ctx, guildID, installation.CategoryID, state.ChannelID, channelName(target.ID))
 		if err != nil {
 			return database.Installation{}, fmt.Errorf("ensure target channel %s: %w", target.ID, err)
 		}

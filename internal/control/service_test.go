@@ -11,7 +11,7 @@ import (
 	"my-movie/internal/domain"
 )
 
-func TestInitializeCreatesPrivateChannelTreeAndPersistsOwner(t *testing.T) {
+func TestInitializeCreatesPublicAlertChannelsPrivateControlAndPersistsOwner(t *testing.T) {
 	store := newFakeStore()
 	channels := &fakeChannels{}
 	service := New(store, channels, nil)
@@ -20,14 +20,17 @@ func TestInitializeCreatesPrivateChannelTreeAndPersistsOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if channels.categoryName != "영화 예매 알림" || channels.categoryOwner != "owner" {
-		t.Fatalf("category name=%q owner=%q", channels.categoryName, channels.categoryOwner)
+	if channels.categoryName != "영화 예매 알림" || !channels.publicCategory {
+		t.Fatalf("category name=%q public=%v", channels.categoryName, channels.publicCategory)
 	}
-	wantNames := []string{"제어", "메가박스-코엑스-돌비", "메가박스-남현아-돌비", "cgv-용산-imax", "cgv-용산-4dx", "cgv-용산-screenx"}
-	if !reflect.DeepEqual(channels.textNames, wantNames) {
-		t.Fatalf("channels=%v want=%v", channels.textNames, wantNames)
+	if !reflect.DeepEqual(channels.privateTextNames, []string{"제어"}) {
+		t.Fatalf("private channels=%v", channels.privateTextNames)
 	}
-	if installation.OwnerUserID != "owner" || installation.ControlMessageID == "" {
+	wantPublicNames := []string{"서버-상태", "메가박스-코엑스-돌비", "메가박스-남현아-돌비", "cgv-용산-imax", "cgv-용산-4dx", "cgv-용산-screenx"}
+	if !reflect.DeepEqual(channels.publicTextNames, wantPublicNames) {
+		t.Fatalf("public channels=%v want=%v", channels.publicTextNames, wantPublicNames)
+	}
+	if installation.OwnerUserID != "owner" || installation.ControlMessageID == "" || installation.StatusChannelID == "" {
 		t.Fatalf("installation=%+v", installation)
 	}
 	if len(store.states) != 5 {
@@ -58,6 +61,9 @@ func TestInitializeReusesSavedChannelsAndRejectsAnotherOwner(t *testing.T) {
 	}
 	if first.CategoryID != second.CategoryID || len(channels.createdIDs) != 0 {
 		t.Fatalf("first=%+v second=%+v newly-created=%v", first, second, channels.createdIDs)
+	}
+	if len(channels.callOrder) < 2 || channels.callOrder[0] != "private:제어" || channels.callOrder[1] != "category:public" {
+		t.Fatalf("unsafe permission update order=%v", channels.callOrder)
 	}
 	if _, err := service.Initialize(context.Background(), "guild", "intruder"); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("error=%v", err)
@@ -155,11 +161,14 @@ func (s *fakeStore) ReplaceBaseline(_ context.Context, targetID string, ids []st
 }
 
 type fakeChannels struct {
-	categoryName  string
-	categoryOwner string
-	textNames     []string
-	createdIDs    []string
-	panels        []Panel
+	categoryName     string
+	categoryOwner    string
+	publicCategory   bool
+	privateTextNames []string
+	publicTextNames  []string
+	createdIDs       []string
+	panels           []Panel
+	callOrder        []string
 }
 
 func (c *fakeChannels) EnsurePrivateCategory(_ context.Context, _ string, existingID, name, ownerID string) (string, error) {
@@ -172,7 +181,28 @@ func (c *fakeChannels) EnsurePrivateCategory(_ context.Context, _ string, existi
 	return id, nil
 }
 func (c *fakeChannels) EnsurePrivateTextChannel(_ context.Context, _ string, _ string, existingID, name, _ string) (string, error) {
-	c.textNames = append(c.textNames, name)
+	c.callOrder = append(c.callOrder, "private:"+name)
+	c.privateTextNames = append(c.privateTextNames, name)
+	if existingID != "" {
+		return existingID, nil
+	}
+	id := "channel-" + name
+	c.createdIDs = append(c.createdIDs, id)
+	return id, nil
+}
+func (c *fakeChannels) EnsurePublicCategory(_ context.Context, _ string, existingID, name string) (string, error) {
+	c.callOrder = append(c.callOrder, "category:public")
+	c.categoryName, c.publicCategory = name, true
+	if existingID != "" {
+		return existingID, nil
+	}
+	id := "category"
+	c.createdIDs = append(c.createdIDs, id)
+	return id, nil
+}
+func (c *fakeChannels) EnsurePublicTextChannel(_ context.Context, _ string, _ string, existingID, name string) (string, error) {
+	c.callOrder = append(c.callOrder, "public:"+name)
+	c.publicTextNames = append(c.publicTextNames, name)
 	if existingID != "" {
 		return existingID, nil
 	}
@@ -188,9 +218,11 @@ func (c *fakeChannels) UpsertPanel(_ context.Context, _ string, existingID strin
 	return "panel", nil
 }
 func (c *fakeChannels) resetCalls() {
-	c.textNames = nil
+	c.privateTextNames = nil
+	c.publicTextNames = nil
 	c.createdIDs = nil
 	c.panels = nil
+	c.callOrder = nil
 }
 
 type fakeBranchProvider struct {

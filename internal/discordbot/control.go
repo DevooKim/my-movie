@@ -29,6 +29,46 @@ func NewChannelManager(session channelSession, botID func() string) *ChannelMana
 	return &ChannelManager{session: session, botID: botID}
 }
 
+func (m *ChannelManager) EnsurePublicCategory(ctx context.Context, guildID, existingID, name string) (string, error) {
+	overwrites := publicOverwrites(guildID, m.botID())
+	if existingID != "" {
+		if channel, err := m.session.Channel(existingID, discordgo.WithContext(ctx)); err == nil && channel.GuildID == guildID && channel.Type == discordgo.ChannelTypeGuildCategory {
+			edited, err := m.session.ChannelEditComplex(existingID, &discordgo.ChannelEdit{Name: name, PermissionOverwrites: overwrites}, discordgo.WithContext(ctx))
+			if err != nil {
+				return "", err
+			}
+			return edited.ID, nil
+		}
+	}
+	channel, err := m.session.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
+		Name: name, Type: discordgo.ChannelTypeGuildCategory, PermissionOverwrites: overwrites,
+	}, discordgo.WithContext(ctx))
+	if err != nil {
+		return "", err
+	}
+	return channel.ID, nil
+}
+
+func (m *ChannelManager) EnsurePublicTextChannel(ctx context.Context, guildID, categoryID, existingID, name string) (string, error) {
+	overwrites := publicOverwrites(guildID, m.botID())
+	if existingID != "" {
+		if channel, err := m.session.Channel(existingID, discordgo.WithContext(ctx)); err == nil && channel.GuildID == guildID && channel.Type == discordgo.ChannelTypeGuildText {
+			edited, err := m.session.ChannelEditComplex(existingID, &discordgo.ChannelEdit{Name: name, ParentID: categoryID, PermissionOverwrites: overwrites}, discordgo.WithContext(ctx))
+			if err != nil {
+				return "", err
+			}
+			return edited.ID, nil
+		}
+	}
+	channel, err := m.session.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
+		Name: name, Type: discordgo.ChannelTypeGuildText, ParentID: categoryID, PermissionOverwrites: overwrites,
+	}, discordgo.WithContext(ctx))
+	if err != nil {
+		return "", err
+	}
+	return channel.ID, nil
+}
+
 func (m *ChannelManager) EnsurePrivateCategory(ctx context.Context, guildID, existingID, name, ownerID string) (string, error) {
 	if existingID != "" {
 		if channel, err := m.session.Channel(existingID, discordgo.WithContext(ctx)); err == nil && channel.GuildID == guildID && channel.Type == discordgo.ChannelTypeGuildCategory {
@@ -97,10 +137,21 @@ func isUnknownMessage(err error) bool {
 
 func privateOverwrites(guildID, ownerID, botID string) []*discordgo.PermissionOverwrite {
 	memberAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory)
+	memberDeny := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionCreatePublicThreads | discordgo.PermissionCreatePrivateThreads | discordgo.PermissionSendMessagesInThreads)
 	return []*discordgo.PermissionOverwrite{
-		{ID: guildID, Type: discordgo.PermissionOverwriteTypeRole, Deny: discordgo.PermissionViewChannel},
+		{ID: guildID, Type: discordgo.PermissionOverwriteTypeRole, Deny: memberDeny},
 		{ID: ownerID, Type: discordgo.PermissionOverwriteTypeMember, Allow: memberAllow},
 		{ID: botID, Type: discordgo.PermissionOverwriteTypeMember, Allow: memberAllow | discordgo.PermissionManageChannels},
+	}
+}
+
+func publicOverwrites(guildID, botID string) []*discordgo.PermissionOverwrite {
+	memberAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory | discordgo.PermissionAddReactions)
+	memberDeny := int64(discordgo.PermissionSendMessages | discordgo.PermissionCreatePublicThreads | discordgo.PermissionCreatePrivateThreads | discordgo.PermissionSendMessagesInThreads)
+	botAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory | discordgo.PermissionSendMessages | discordgo.PermissionAddReactions | discordgo.PermissionManageChannels)
+	return []*discordgo.PermissionOverwrite{
+		{ID: guildID, Type: discordgo.PermissionOverwriteTypeRole, Allow: memberAllow, Deny: memberDeny},
+		{ID: botID, Type: discordgo.PermissionOverwriteTypeMember, Allow: botAllow},
 	}
 }
 

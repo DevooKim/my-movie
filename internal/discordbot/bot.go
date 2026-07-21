@@ -75,7 +75,7 @@ func (b *Bot) handleCommand(session *discordgo.Session, interaction *discordgo.I
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	_, err := b.controller.Initialize(ctx, interaction.GuildID, interactionUserID(interaction))
-	content := "비공개 알림 채널과 제어 패널을 준비했습니다."
+	content := "공개 알림 채널과 비공개 제어 패널을 준비했습니다."
 	if err != nil {
 		content = "초기화하지 못했습니다: " + err.Error()
 	}

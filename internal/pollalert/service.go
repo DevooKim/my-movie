@@ -26,7 +26,9 @@ type Service struct {
 	messenger Messenger
 }
 
-func New(store Store, messenger Messenger) *Service { return &Service{store: store, messenger: messenger} }
+func New(store Store, messenger Messenger) *Service {
+	return &Service{store: store, messenger: messenger}
+}
 
 func (s *Service) Report(ctx context.Context, group database.PollingGroup, theaterName string, fetchErr error) error {
 	installation, err := s.store.GetInstallation(ctx)
@@ -40,11 +42,13 @@ func (s *Service) Report(ctx context.Context, group database.PollingGroup, theat
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	stateMissing := errors.Is(err, sql.ErrNoRows)
 	failed := fetchErr != nil
-	if state.Failed == failed && !errors.Is(err, sql.ErrNoRows) {
+	if !failed && stateMissing {
 		return nil
 	}
-	if !failed && errors.Is(err, sql.ErrNoRows) {
+	sameTransition := !stateMissing && state.Failed == failed
+	if sameTransition && state.ControlDelivered && (state.StatusDelivered || installation.StatusChannelID == "") {
 		return nil
 	}
 	provider := string(group.Provider)
@@ -54,16 +58,51 @@ func (s *Service) Report(ctx context.Context, group database.PollingGroup, theat
 	if group.Provider == "megabox" {
 		provider = "메가박스"
 	}
-	message := fmt.Sprintf("✅ %s · %s 조회가 정상화되었습니다", provider, theaterName)
 	summary := ""
 	if failed {
-		summary = truncate(fetchErr.Error(), 500)
+		if sameTransition && state.ErrorSummary != "" {
+			summary = state.ErrorSummary
+		} else {
+			summary = truncate(fetchErr.Error(), 500)
+		}
+	}
+	message := fmt.Sprintf("✅ %s · %s 조회가 정상화되었습니다", provider, theaterName)
+	statusMessage := message
+	if failed {
 		message = fmt.Sprintf("⚠️ %s · %s 조회 실패\n%s", provider, theaterName, summary)
+		statusMessage = fmt.Sprintf("⚠️ %s · %s 조회가 원활하지 않습니다", provider, theaterName)
 	}
-	if err := s.messenger.SendControlMessage(ctx, installation.ControlChannelID, message); err != nil {
-		return err
+	controlDelivered := false
+	statusDelivered := installation.StatusChannelID == "" && !failed
+	if sameTransition {
+		controlDelivered = state.ControlDelivered
+		statusDelivered = state.StatusDelivered
+	} else if !stateMissing && !failed {
+		controlDelivered = !state.ControlDelivered
+		statusDelivered = installation.StatusChannelID == "" || !state.StatusDelivered
 	}
-	return s.store.SavePollAlertState(ctx, database.PollAlertState{Provider: group.Provider, TheaterID: group.TheaterID, Failed: failed, ErrorSummary: summary})
+	var sendErrors []error
+	if !controlDelivered {
+		if err := s.messenger.SendControlMessage(ctx, installation.ControlChannelID, message); err != nil {
+			sendErrors = append(sendErrors, fmt.Errorf("send control alert: %w", err))
+		} else {
+			controlDelivered = true
+		}
+	}
+	if !statusDelivered && installation.StatusChannelID != "" {
+		if err := s.messenger.SendControlMessage(ctx, installation.StatusChannelID, statusMessage); err != nil {
+			sendErrors = append(sendErrors, fmt.Errorf("send public status alert: %w", err))
+		} else {
+			statusDelivered = true
+		}
+	}
+	if err := s.store.SavePollAlertState(ctx, database.PollAlertState{
+		Provider: group.Provider, TheaterID: group.TheaterID, Failed: failed, ErrorSummary: summary,
+		ControlDelivered: controlDelivered, StatusDelivered: statusDelivered,
+	}); err != nil {
+		sendErrors = append(sendErrors, err)
+	}
+	return errors.Join(sendErrors...)
 }
 
 func truncate(value string, maximum int) string {
