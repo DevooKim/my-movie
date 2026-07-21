@@ -101,6 +101,38 @@ func TestReplaceBaselineAndRecordSnapshotQueueOnlyNewShowtimes(t *testing.T) {
 	}
 }
 
+func TestRecordSnapshotRefreshesPresentationMetadataForPendingDelivery(t *testing.T) {
+	repository, closeDatabase := newTestRepository(t)
+	defer closeDatabase()
+	ctx := context.Background()
+	targetID := "cgv-yongsan-imax"
+	if err := repository.SaveTargetState(ctx, TargetState{TargetID: targetID, ChannelID: "imax", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	showtime := domain.Showtime{
+		Provider: domain.ProviderCGV, TargetID: targetID, TheaterID: "0013", TheaterName: "용산아이파크몰",
+		MovieID: "m1", MovieName: "오디세이", ExternalID: "same-session", PlayDate: "2026-08-10",
+		StartsAt: "00:00", EndsAt: "02:30", Auditorium: "IMAX관", Format: "IMAX",
+	}
+	if err := repository.RecordTargetSnapshot(ctx, targetID, []domain.Showtime{showtime}); err != nil {
+		t.Fatal(err)
+	}
+	showtime.PlayDate = "2026-08-09"
+	showtime.StartsAt = "24:00"
+	showtime.EndsAt = "26:30"
+	if err := repository.RecordTargetSnapshot(ctx, targetID, []domain.Showtime{showtime}); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := repository.ListPendingChannelDeliveries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].Showtime.PlayDate != "2026-08-09" || pending[0].Showtime.StartsAt != "24:00" || pending[0].Showtime.EndsAt != "26:30" {
+		t.Fatalf("pending=%+v", pending)
+	}
+}
+
 func TestReplaceBaselineDiscardsPendingAlertsFromBeforeReenable(t *testing.T) {
 	repository, closeDatabase := newTestRepository(t)
 	defer closeDatabase()

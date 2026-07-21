@@ -225,8 +225,7 @@ func normalizeDateTime(rawDate, rawTime string) (string, string, error) {
 	if errH != nil || errM != nil || hour < 0 || hour >= 48 || minute < 0 || minute >= 60 {
 		return "", "", fmt.Errorf("invalid cgv start time %q", rawTime)
 	}
-	date = date.AddDate(0, 0, hour/24)
-	return date.Format("2006-01-02"), fmt.Sprintf("%02d:%02d", hour%24, minute), nil
+	return date.Format("2006-01-02"), fmt.Sprintf("%02d:%02d", hour, minute), nil
 }
 
 type fakeTransport struct {

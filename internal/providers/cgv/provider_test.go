@@ -28,8 +28,25 @@ func TestFetchBranchSnapshotSplitsPremiumTargetsAndKeepsMetadata(t *testing.T) {
 	if got[0].TargetID != "cgv-yongsan-imax" || got[0].MovieName != "호프" || got[0].EndsAt != "21:56" || got[0].RemainingSeats != 57 || got[0].TotalSeats != 144 || !got[0].SeatCountKnown {
 		t.Fatalf("imax=%+v", got[0])
 	}
-	if got[1].TargetID != "cgv-yongsan-4dx" || got[1].SeatCountKnown {
+	if got[1].TargetID != "cgv-yongsan-4dx" || got[1].EndsAt != "24:10" || got[1].SeatCountKnown {
 		t.Fatalf("4dx=%+v", got[1])
+	}
+}
+
+func TestNormalizeDateTimePreservesCGVBusinessDateAndExtendedHour(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want string
+	}{
+		{raw: "1910", want: "19:10"},
+		{raw: "2400", want: "24:00"},
+		{raw: "2510", want: "25:10"},
+		{raw: "4759", want: "47:59"},
+	} {
+		date, clock, err := normalizeDateTime("20260809", test.raw)
+		if err != nil || date != "2026-08-09" || clock != test.want {
+			t.Fatalf("raw=%s date=%s clock=%s err=%v", test.raw, date, clock, err)
+		}
 	}
 }
 

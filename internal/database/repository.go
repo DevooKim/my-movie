@@ -240,6 +240,9 @@ func (r *Repository) recordTargetSnapshot(ctx context.Context, state TargetState
 			  seat_count_known, poster_url, first_seen_at, last_seen_at
 			) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(target_id, showtime_id) DO UPDATE SET
+			  play_date=excluded.play_date,
+			  starts_at=excluded.starts_at,
+			  ends_at=excluded.ends_at,
 			  remaining_seats=excluded.remaining_seats,
 			  total_seats=excluded.total_seats,
 			  seat_count_known=excluded.seat_count_known,
