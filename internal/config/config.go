@@ -24,6 +24,7 @@ type Config struct {
 	Port                 int
 	Timezone             string
 	AppLaunchBaseURL     string
+	HealthcheckPingURL   string
 }
 
 func Load() (Config, error) {
@@ -48,6 +49,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	healthcheckPingURL, err := optionalHTTPSBaseURL("HEALTHCHECK_PING_URL")
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		DiscordBotToken:      botToken,
@@ -57,6 +62,7 @@ func Load() (Config, error) {
 		Port:                 port,
 		Timezone:             valueOrDefault("TZ", defaultTimezone),
 		AppLaunchBaseURL:     appLaunchBaseURL,
+		HealthcheckPingURL:   healthcheckPingURL,
 	}, nil
 }
 

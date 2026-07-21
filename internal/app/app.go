@@ -35,12 +35,14 @@ type pollScheduler interface {
 	Start(context.Context)
 	Stop(context.Context) error
 }
+type heartbeatPinger interface{ Start(context.Context) }
 
 type components struct {
 	database  databaseCloser
 	health    healthServer
 	discord   discordClient
 	scheduler pollScheduler
+	heartbeat heartbeatPinger
 }
 
 type App struct {
@@ -91,7 +93,8 @@ func New(configuration config.Config) (*App, error) {
 	poller := scheduler.New(repository, notifications, branchProviders, scheduler.Options{Interval: config.PollInterval, Reporter: pollErrors})
 	healthHandler := health.NewHandler(repository, config.PollInterval, time.Now)
 	healthServer := health.NewServer(configuration.Port, healthHandler)
-	return newWithComponents(components{database: db, health: healthServer, discord: bot, scheduler: poller}), nil
+	heartbeat := health.NewPinger(configuration.HealthcheckPingURL, time.Minute)
+	return newWithComponents(components{database: db, health: healthServer, discord: bot, scheduler: poller, heartbeat: heartbeat}), nil
 }
 
 func newWithComponents(input components) *App { return &App{components: input} }
@@ -109,6 +112,9 @@ func (a *App) Start() error {
 	rootCtx, cancel := context.WithCancel(context.Background())
 	a.rootCancel = cancel
 	a.scheduler.Start(rootCtx)
+	if a.heartbeat != nil {
+		a.heartbeat.Start(rootCtx)
+	}
 	a.started = true
 	return nil
 }

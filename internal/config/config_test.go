@@ -14,6 +14,7 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("PORT", "")
 	t.Setenv("TZ", "")
 	t.Setenv("APP_LAUNCH_BASE_URL", "")
+	t.Setenv("HEALTHCHECK_PING_URL", "")
 }
 
 func TestLoadAcceptsHTTPSAppLaunchBaseURL(t *testing.T) {
