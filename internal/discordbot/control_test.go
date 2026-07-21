@@ -9,13 +9,14 @@ import (
 	"my-movie/internal/control"
 )
 
-func TestCommandExposesOnlyInitialization(t *testing.T) {
+func TestCommandExposesInitializationAndOwnerAnnouncement(t *testing.T) {
 	command := Command()
-	if command.Name != "알림" || len(command.Options) != 1 || command.Options[0].Name != "초기화" {
+	if command.Name != "알림" || len(command.Options) != 2 || command.Options[0].Name != "초기화" || command.Options[1].Name != "공지" {
 		t.Fatalf("command=%+v", command)
 	}
-	if command.Options[0].Type != discordgo.ApplicationCommandOptionSubCommand {
-		t.Fatalf("option type=%v", command.Options[0].Type)
+	announcement := command.Options[1]
+	if announcement.Type != discordgo.ApplicationCommandOptionSubCommand || len(announcement.Options) != 1 || announcement.Options[0].Name != "내용" || announcement.Options[0].Type != discordgo.ApplicationCommandOptionString || !announcement.Options[0].Required {
+		t.Fatalf("announcement=%+v", announcement)
 	}
 }
 
@@ -47,10 +48,81 @@ func TestPrivateOverwritesHideChannelsFromEveryone(t *testing.T) {
 	if overwrites[0].ID != "guild" || overwrites[0].Type != discordgo.PermissionOverwriteTypeRole || overwrites[0].Deny&discordgo.PermissionViewChannel == 0 || overwrites[0].Deny&discordgo.PermissionSendMessages == 0 {
 		t.Fatalf("everyone=%+v", overwrites[0])
 	}
-	for _, overwrite := range overwrites[1:] {
-		if overwrite.Type != discordgo.PermissionOverwriteTypeMember || overwrite.Allow&discordgo.PermissionViewChannel == 0 || overwrite.Allow&discordgo.PermissionSendMessages == 0 {
-			t.Fatalf("member=%+v", overwrite)
-		}
+	owner := overwrites[1]
+	if owner.Type != discordgo.PermissionOverwriteTypeMember || owner.Allow&discordgo.PermissionViewChannel == 0 || owner.Allow&discordgo.PermissionReadMessageHistory == 0 || owner.Allow&discordgo.PermissionSendMessages != 0 {
+		t.Fatalf("owner=%+v", owner)
+	}
+	bot := overwrites[2]
+	if bot.Type != discordgo.PermissionOverwriteTypeMember || bot.Allow&discordgo.PermissionSendMessages == 0 {
+		t.Fatalf("bot=%+v", bot)
+	}
+}
+
+func TestRestrictedOverwritesExposeReadOnlyChannelsOnlyToViewerRole(t *testing.T) {
+	overwrites := restrictedOverwrites("guild", "viewer", "bot")
+	if len(overwrites) != 3 {
+		t.Fatalf("overwrites=%+v", overwrites)
+	}
+	everyone := overwrites[0]
+	if everyone.ID != "guild" || everyone.Deny&discordgo.PermissionViewChannel == 0 || everyone.Deny&discordgo.PermissionSendMessages == 0 {
+		t.Fatalf("everyone=%+v", everyone)
+	}
+	viewer := overwrites[1]
+	viewerAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory | discordgo.PermissionAddReactions)
+	viewerDeny := int64(discordgo.PermissionSendMessages | discordgo.PermissionCreatePublicThreads | discordgo.PermissionCreatePrivateThreads | discordgo.PermissionSendMessagesInThreads)
+	if viewer.ID != "viewer" || viewer.Type != discordgo.PermissionOverwriteTypeRole || viewer.Allow&viewerAllow != viewerAllow || viewer.Deny&viewerDeny != viewerDeny {
+		t.Fatalf("viewer=%+v", viewer)
+	}
+	bot := overwrites[2]
+	if bot.ID != "bot" || bot.Allow&discordgo.PermissionSendMessages == 0 || bot.Allow&discordgo.PermissionManageChannels == 0 {
+		t.Fatalf("bot=%+v", bot)
+	}
+}
+
+func TestGuideMessageIncludesPlatformNeutralCopyImageAndJoinButton(t *testing.T) {
+	message := guideMessage()
+	if strings.Contains(strings.ToLower(message.Content), "iphone") || strings.Contains(message.Content, "아이폰") {
+		t.Fatalf("platform-specific content=%q", message.Content)
+	}
+	if !strings.Contains(message.Content, "CGV와 메가박스") || len(message.Files) != 1 || message.Files[0].Name != "my-movie-pepe.png" {
+		t.Fatalf("message=%+v", message)
+	}
+	button := message.Components[0].(discordgo.ActionsRow).Components[0].(discordgo.Button)
+	if button.CustomID != "alerts:join" || button.Label != "🔔 알림 채널 보기" {
+		t.Fatalf("button=%+v", button)
+	}
+}
+
+func TestViewerRoleMustBeUnmanagedUnprivilegedAndBelowBot(t *testing.T) {
+	tests := []struct {
+		name string
+		role *discordgo.Role
+		want bool
+	}{
+		{name: "safe", role: &discordgo.Role{ID: "viewer", Position: 1}, want: true},
+		{name: "administrator", role: &discordgo.Role{ID: "viewer", Position: 1, Permissions: discordgo.PermissionAdministrator}},
+		{name: "managed", role: &discordgo.Role{ID: "viewer", Position: 1, Managed: true}},
+		{name: "above bot", role: &discordgo.Role{ID: "viewer", Position: 3}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isSafeViewerRole(test.role, 2); got != test.want {
+				t.Fatalf("safe=%v want=%v role=%+v", got, test.want, test.role)
+			}
+		})
+	}
+}
+
+func TestGuideMessageCanBeRecoveredOnlyFromBotAuthoredJoinButton(t *testing.T) {
+	guide := &discordgo.Message{Author: &discordgo.User{ID: "bot"}, Components: []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{discordgo.Button{CustomID: "alerts:join"}}},
+	}}
+	if !isGuideMessage(guide, "bot") {
+		t.Fatal("bot guide message was not recognized")
+	}
+	guide.Author.ID = "member"
+	if isGuideMessage(guide, "bot") {
+		t.Fatal("member-authored message was accepted")
 	}
 }
 

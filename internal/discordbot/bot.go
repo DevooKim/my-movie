@@ -3,6 +3,7 @@ package discordbot
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -15,6 +16,8 @@ type Controller interface {
 	SelectTarget(context.Context, string, string) error
 	Enable(context.Context, string, string) error
 	Disable(context.Context, string, string) error
+	JoinAlerts(context.Context, string) error
+	Announce(context.Context, string, string) error
 }
 
 type Bot struct {
@@ -67,19 +70,38 @@ func (b *Bot) handleInteraction(session *discordgo.Session, interaction *discord
 
 func (b *Bot) handleCommand(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
 	data := interaction.ApplicationCommandData()
-	if len(data.Options) != 1 || data.Options[0].Name != "초기화" {
+	if len(data.Options) != 1 {
 		b.respond(session, interaction, "알 수 없는 하위 명령입니다.")
 		return
 	}
 	b.deferResponse(session, interaction)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	_, err := b.controller.Initialize(ctx, interaction.GuildID, interactionUserID(interaction))
-	content := "공개 알림 채널과 비공개 제어 패널을 준비했습니다."
-	if err != nil {
-		content = "초기화하지 못했습니다: " + err.Error()
-	}
+	content := b.executeCommand(ctx, interaction.GuildID, interactionUserID(interaction), data)
 	_, _ = session.InteractionResponseEdit(interaction.Interaction, &discordgo.WebhookEdit{Content: &content})
+}
+
+func (b *Bot) executeCommand(ctx context.Context, guildID, userID string, data discordgo.ApplicationCommandInteractionData) string {
+	if len(data.Options) != 1 {
+		return "알 수 없는 하위 명령입니다."
+	}
+	switch option := data.Options[0]; option.Name {
+	case "초기화":
+		if _, err := b.controller.Initialize(ctx, guildID, userID); err != nil {
+			return "초기화하지 못했습니다: " + err.Error()
+		}
+		return "안내, 공지와 영화 예매 알림 채널을 준비했습니다."
+	case "공지":
+		if len(option.Options) != 1 || option.Options[0].Name != "내용" {
+			return "공지 내용을 확인하지 못했습니다."
+		}
+		if err := b.controller.Announce(ctx, userID, option.Options[0].StringValue()); err != nil {
+			return "공지를 게시하지 못했습니다: " + err.Error()
+		}
+		return "공지를 게시했습니다."
+	default:
+		return "알 수 없는 하위 명령입니다."
+	}
 }
 
 func (b *Bot) handleComponent(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
@@ -88,7 +110,12 @@ func (b *Bot) handleComponent(session *discordgo.Session, interaction *discordgo
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	var err error
-	if data.CustomID == "alerts:target" {
+	if data.CustomID == "alerts:join" {
+		b.deferResponse(session, interaction)
+		content := b.executeJoin(ctx, userID)
+		_, _ = session.InteractionResponseEdit(interaction.Interaction, &discordgo.WebhookEdit{Content: &content})
+		return
+	} else if data.CustomID == "alerts:target" {
 		if len(data.Values) != 1 {
 			return
 		}
@@ -119,6 +146,14 @@ func (b *Bot) handleComponent(session *discordgo.Session, interaction *discordgo
 	} else {
 		return
 	}
+}
+
+func (b *Bot) executeJoin(ctx context.Context, userID string) string {
+	if err := b.controller.JoinAlerts(ctx, userID); err != nil {
+		slog.Error("assign alert viewer role failed", "user_id", userID, "error", err)
+		return "알림 채널을 열지 못했습니다. 잠시 후 다시 시도해 주세요."
+	}
+	return "알림 채널을 열었습니다."
 }
 
 func (b *Bot) deferResponse(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
