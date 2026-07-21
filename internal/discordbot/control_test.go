@@ -88,10 +88,11 @@ func TestGuideImageMessageContainsOnlyImage(t *testing.T) {
 
 func TestGuideMessageIncludesPlatformNeutralCopyAndJoinButton(t *testing.T) {
 	message := guideMessage()
+	wantIntro := "🎬 **영화 예매 감시국**\n영화 예매 감시국에 오신 것을 환영합니다.\n영화 예매 일정이 새로 열리면 Discord로 알려드립니다."
 	if strings.Contains(strings.ToLower(message.Content), "iphone") || strings.Contains(message.Content, "아이폰") {
 		t.Fatalf("platform-specific content=%q", message.Content)
 	}
-	if !strings.Contains(message.Content, "CGV와 메가박스") || len(message.Files) != 0 {
+	if !strings.HasPrefix(message.Content, wantIntro) || len(message.Files) != 0 {
 		t.Fatalf("message=%+v", message)
 	}
 	button := message.Components[0].(discordgo.ActionsRow).Components[0].(discordgo.Button)

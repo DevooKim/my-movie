@@ -495,9 +495,9 @@ func panelMessage(panel control.Panel) *discordgo.MessageSend {
 
 func guideMessage() *discordgo.MessageSend {
 	return &discordgo.MessageSend{
-		Content: `🎬 **영화 예매 오픈 알림**
-
-CGV와 메가박스의 특별관 예매 일정이 새로 열리면 Discord로 알려드립니다.
+		Content: `🎬 **영화 예매 감시국**
+영화 예매 감시국에 오신 것을 환영합니다.
+영화 예매 일정이 새로 열리면 Discord로 알려드립니다.
 
 **지원 영화관**
 
