@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -25,10 +26,12 @@ type Bot struct {
 	guildID       string
 	controller    Controller
 	removeHandler func()
+	joinMu        sync.Mutex
+	joinAttempts  map[string]time.Time
 }
 
 func NewBot(session *discordgo.Session, guildID string, controller Controller) *Bot {
-	return &Bot{session: session, guildID: guildID, controller: controller}
+	return &Bot{session: session, guildID: guildID, controller: controller, joinAttempts: make(map[string]time.Time)}
 }
 
 func (b *Bot) Start() error {
@@ -112,6 +115,11 @@ func (b *Bot) handleComponent(session *discordgo.Session, interaction *discordgo
 	var err error
 	if data.CustomID == "alerts:join" {
 		b.deferResponse(session, interaction)
+		if !b.allowJoin(userID) {
+			content := "알림 채널 보기는 10초에 한 번만 사용할 수 있습니다. 잠시 후 다시 시도해 주세요."
+			_, _ = session.InteractionResponseEdit(interaction.Interaction, &discordgo.WebhookEdit{Content: &content})
+			return
+		}
 		content := b.executeJoin(ctx, userID)
 		_, _ = session.InteractionResponseEdit(interaction.Interaction, &discordgo.WebhookEdit{Content: &content})
 		return
@@ -146,6 +154,23 @@ func (b *Bot) handleComponent(session *discordgo.Session, interaction *discordgo
 	} else {
 		return
 	}
+}
+
+func (b *Bot) allowJoin(userID string) bool {
+	now := time.Now()
+	cutoff := now.Add(-10 * time.Second)
+	b.joinMu.Lock()
+	defer b.joinMu.Unlock()
+	for id, attemptedAt := range b.joinAttempts {
+		if attemptedAt.Before(cutoff) {
+			delete(b.joinAttempts, id)
+		}
+	}
+	if attemptedAt, exists := b.joinAttempts[userID]; exists && now.Sub(attemptedAt) < 10*time.Second {
+		return false
+	}
+	b.joinAttempts[userID] = now
+	return true
 }
 
 func (b *Bot) executeJoin(ctx context.Context, userID string) string {
